@@ -1,0 +1,1080 @@
+/**
+ * HappyClaw Agent Runner
+ * Runs inside a container, receives config via stdin, outputs result to stdout
+ *
+ * Input protocol:
+ *   Stdin: Full ContainerInput JSON (read until EOF, like before)
+ *   IPC:   Follow-up messages written as JSON files to /workspace/ipc/input/
+ *          Files: {type:"message", text:"..."}.json — polled and consumed
+ *          Sentinel: /workspace/ipc/input/_close — signals session end
+ *
+ * Stdout protocol:
+ *   Each result is wrapped in OUTPUT_START_MARKER / OUTPUT_END_MARKER pairs.
+ *   Multiple results may be emitted (one per agent teams result).
+ *   Final marker after loop ends signals completion.
+ */
+
+import fs from 'fs';
+import path from 'path';
+import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { fileURLToPath } from 'url';
+
+// 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
+const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
+const WORKSPACE_GLOBAL = process.env.HAPPYCLAW_WORKSPACE_GLOBAL || '/workspace/global';
+const WORKSPACE_MEMORY = process.env.HAPPYCLAW_WORKSPACE_MEMORY || '/workspace/memory';
+const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
+
+interface ContainerInput {
+  prompt: string;
+  sessionId?: string;
+  groupFolder: string;
+  chatJid: string;
+  isMain: boolean;
+  isScheduledTask?: boolean;
+  images?: Array<{ data: string; mimeType?: string }>;
+}
+
+// --- Streaming event types ---
+// ⚠️ 与 src/types.ts (后端) 和 web/src/stores/chat.ts (前端) 保持同步
+export type StreamEventType =
+  | 'text_delta' | 'thinking_delta'
+  | 'tool_use_start' | 'tool_use_end' | 'tool_progress'
+  | 'hook_started' | 'hook_progress' | 'hook_response' // TODO: hook 事件尚未实现
+  | 'status' | 'init'; // TODO: init 事件尚未实现
+
+export interface StreamEvent {
+  eventType: StreamEventType;
+  text?: string;
+  toolName?: string;
+  toolUseId?: string;
+  parentToolUseId?: string | null;
+  isNested?: boolean;
+  skillName?: string;
+  toolInputSummary?: string;
+  elapsedSeconds?: number;
+  hookName?: string;
+  hookEvent?: string;
+  hookOutcome?: string;
+  statusText?: string;
+}
+
+interface ContainerOutput {
+  status: 'success' | 'error' | 'stream';
+  result: string | null;
+  newSessionId?: string;
+  error?: string;
+  streamEvent?: StreamEvent;
+}
+
+interface SessionEntry {
+  sessionId: string;
+  fullPath: string;
+  summary: string;
+  firstPrompt: string;
+}
+
+interface SessionsIndex {
+  entries: SessionEntry[];
+}
+
+interface SDKUserMessage {
+  type: 'user';
+  message: {
+    role: 'user';
+    content:
+      | string
+      | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }>;
+  };
+  parent_tool_use_id: null;
+  session_id: string;
+}
+
+const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
+const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+const IPC_POLL_MS = 500;
+
+let needsMemoryFlush = false;
+
+const DEFAULT_ALLOWED_TOOLS = [
+  'Bash',
+  'Read', 'Write', 'Edit', 'Glob', 'Grep',
+  'WebSearch', 'WebFetch',
+  'Task', 'TaskOutput', 'TaskStop',
+  'TeamCreate', 'TeamDelete', 'SendMessage',
+  'TodoWrite', 'ToolSearch', 'Skill',
+  'NotebookEdit',
+  'mcp__happyclaw__*'
+];
+
+const MEMORY_FLUSH_ALLOWED_TOOLS = [
+  'mcp__happyclaw__memory_search',
+  'mcp__happyclaw__memory_get',
+  'mcp__happyclaw__memory_append',
+  'Read',  // 读取全局 CLAUDE.md 当前内容
+  'Edit',  // 编辑全局 CLAUDE.md（永久记忆）
+];
+
+// Memory flush 期间禁用的工具（disallowedTools 会从模型上下文中完全移除这些工具）
+// 注意：allowedTools 仅控制自动审批，不限制工具可见性；
+//       bypassPermissions 模式下所有工具都自动通过，所以必须用 disallowedTools 来限制
+const MEMORY_FLUSH_DISALLOWED_TOOLS = [
+  'Bash', 'Write', 'WebSearch', 'WebFetch', 'Glob', 'Grep',
+  'Task', 'TaskOutput', 'TaskStop',
+  'TeamCreate', 'TeamDelete', 'SendMessage',
+  'TodoWrite', 'ToolSearch', 'Skill', 'NotebookEdit',
+  'mcp__happyclaw__send_message',
+  'mcp__happyclaw__schedule_task',
+  'mcp__happyclaw__list_tasks',
+  'mcp__happyclaw__pause_task',
+  'mcp__happyclaw__resume_task',
+  'mcp__happyclaw__cancel_task',
+  'mcp__happyclaw__register_group',
+];
+
+/**
+ * Push-based async iterable for streaming user messages to the SDK.
+ * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
+ */
+class MessageStream {
+  private queue: SDKUserMessage[] = [];
+  private waiting: (() => void) | null = null;
+  private done = false;
+
+  push(text: string, images?: Array<{ data: string; mimeType?: string }>): void {
+    let content:
+      | string
+      | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }>;
+
+    if (images && images.length > 0) {
+      // 多模态消息：text + images
+      content = [
+        { type: 'text', text },
+        ...images.map((img) => ({
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: img.mimeType || 'image/png',
+            data: img.data,
+          },
+        })),
+      ];
+    } else {
+      // 纯文本消息
+      content = text;
+    }
+
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  end(): void {
+    this.done = true;
+    this.waiting?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
+    while (true) {
+      while (this.queue.length > 0) {
+        yield this.queue.shift()!;
+      }
+      if (this.done) return;
+      await new Promise<void>(r => { this.waiting = r; });
+      this.waiting = null;
+    }
+  }
+}
+
+async function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => { data += chunk; });
+    process.stdin.on('end', () => resolve(data));
+    process.stdin.on('error', reject);
+  });
+}
+
+const OUTPUT_START_MARKER = '---HAPPYCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---HAPPYCLAW_OUTPUT_END---';
+
+function writeOutput(output: ContainerOutput): void {
+  console.log(OUTPUT_START_MARKER);
+  console.log(JSON.stringify(output));
+  console.log(OUTPUT_END_MARKER);
+}
+
+function log(message: string): void {
+  console.error(`[agent-runner] ${message}`);
+}
+
+/**
+ * 检测是否为上下文溢出错误
+ */
+function isContextOverflowError(msg: string): boolean {
+  const patterns = [
+    /prompt is too long/i,
+    /maximum context length/i,
+    /context.*too large/i,
+    /exceeds.*token limit/i,
+    /context window.*exceeded/i,
+  ];
+  return patterns.some(pattern => pattern.test(msg));
+}
+
+function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
+  const projectDir = path.dirname(transcriptPath);
+  const indexPath = path.join(projectDir, 'sessions-index.json');
+
+  if (!fs.existsSync(indexPath)) {
+    log(`Sessions index not found at ${indexPath}`);
+    return null;
+  }
+
+  try {
+    const index: SessionsIndex = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+    const entry = index.entries.find(e => e.sessionId === sessionId);
+    if (entry?.summary) {
+      return entry.summary;
+    }
+  } catch (err) {
+    log(`Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return null;
+}
+
+/**
+ * Archive the full transcript to conversations/ before compaction.
+ */
+function createPreCompactHook(isMain: boolean): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const preCompact = input as PreCompactHookInput;
+    const transcriptPath = preCompact.transcript_path;
+    const sessionId = preCompact.session_id;
+
+    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+      log('No transcript found for archiving');
+      return {};
+    }
+
+    try {
+      const content = fs.readFileSync(transcriptPath, 'utf-8');
+      const messages = parseTranscript(content);
+
+      if (messages.length === 0) {
+        log('No messages to archive');
+        return {};
+      }
+
+      const summary = getSessionSummary(sessionId, transcriptPath);
+      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
+
+      const conversationsDir = path.join(WORKSPACE_GROUP, 'conversations');
+      fs.mkdirSync(conversationsDir, { recursive: true });
+
+      const date = new Date().toISOString().split('T')[0];
+      const filename = `${date}-${name}.md`;
+      const filePath = path.join(conversationsDir, filename);
+
+      const markdown = formatTranscriptMarkdown(messages, summary);
+      fs.writeFileSync(filePath, markdown);
+
+      log(`Archived conversation to ${filePath}`);
+    } catch (err) {
+      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Flag memory flush for main container
+    if (isMain) {
+      needsMemoryFlush = true;
+      log('PreCompact: flagged memory flush for main container');
+    }
+
+    return {};
+  };
+}
+
+function sanitizeFilename(summary: string): string {
+  return summary
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50);
+}
+
+function generateFallbackName(): string {
+  const time = new Date();
+  return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
+}
+
+interface ParsedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+function parseTranscript(content: string): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
+
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'user' && entry.message?.content) {
+        const text = typeof entry.message.content === 'string'
+          ? entry.message.content
+          : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
+        if (text) messages.push({ role: 'user', content: text });
+      } else if (entry.type === 'assistant' && entry.message?.content) {
+        const textParts = entry.message.content
+          .filter((c: { type: string }) => c.type === 'text')
+          .map((c: { text: string }) => c.text);
+        const text = textParts.join('');
+        if (text) messages.push({ role: 'assistant', content: text });
+      }
+    } catch {
+    }
+  }
+
+  return messages;
+}
+
+function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null): string {
+  const now = new Date();
+  const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  const lines: string[] = [];
+  lines.push(`# ${title || 'Conversation'}`);
+  lines.push('');
+  lines.push(`Archived: ${formatDateTime(now)}`);
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  for (const msg of messages) {
+    const sender = msg.role === 'user' ? 'User' : 'HappyClaw';
+    const content = msg.content.length > 2000
+      ? msg.content.slice(0, 2000) + '...'
+      : msg.content;
+    lines.push(`**${sender}**: ${content}`);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Check for _close sentinel.
+ */
+function shouldClose(): boolean {
+  if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
+    try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Drain all pending IPC input messages.
+ * Returns messages found (with optional images), or empty array.
+ */
+function drainIpcInput(): Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }> {
+  try {
+    fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+    const files = fs.readdirSync(IPC_INPUT_DIR)
+      .filter(f => f.endsWith('.json'))
+      .sort();
+
+    const messages: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }> = [];
+    for (const file of files) {
+      const filePath = path.join(IPC_INPUT_DIR, file);
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        fs.unlinkSync(filePath);
+        if (data.type === 'message' && data.text) {
+          messages.push({
+            text: data.text,
+            images: data.images,
+          });
+        }
+      } catch (err) {
+        log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
+        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+      }
+    }
+    return messages;
+  } catch (err) {
+    log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+}
+
+/**
+ * Wait for a new IPC message or _close sentinel.
+ * Returns the messages (with optional images), or null if _close.
+ */
+function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }> } | null> {
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (shouldClose()) {
+        resolve(null);
+        return;
+      }
+      const messages = drainIpcInput();
+      if (messages.length > 0) {
+        // 合并多条消息的文本和图片
+        const combinedText = messages.map((m) => m.text).join('\n');
+        const allImages = messages.flatMap((m) => m.images || []);
+        resolve({ text: combinedText, images: allImages.length > 0 ? allImages : undefined });
+        return;
+      }
+      setTimeout(poll, IPC_POLL_MS);
+    };
+    poll();
+  });
+}
+
+function buildMemoryRecallPrompt(isMain: boolean): string {
+  if (isMain) {
+    return [
+      '',
+      '## 记忆系统',
+      '',
+      '你拥有跨会话的持久记忆能力，请积极使用。',
+      '',
+      '### 回忆',
+      '在回答关于过去的工作、决策、日期、偏好或待办事项之前：',
+      '先用 `memory_search` 搜索，再用 `memory_get` 获取完整上下文。',
+      '',
+      '### 存储——两层记忆架构',
+      '',
+      '获知重要信息后**必须立即保存**，不要等到上下文压缩。',
+      '根据信息的**时效性**选择存储位置：',
+      '',
+      '#### 全局记忆（永久）→ 直接编辑 `/workspace/global/CLAUDE.md`',
+      '适用于**长期不变、跨会话始终需要**的信息：',
+      '- 用户身份：姓名、生日、联系方式、地址、工作单位',
+      '- 长期偏好：沟通风格、称呼方式、喜好厌恶',
+      '- 身份配置：你的名字、角色设定、行为准则',
+      '',
+      '使用 `Read` 工具读取当前内容，再用 `Edit` 工具**原地更新对应字段**。',
+      '不要追加重复信息，保持文件简洁有序。',
+      '',
+      '#### 日期记忆（时效性）→ 调用 `memory_append`',
+      '适用于**与时间相关、可能过时**的信息：',
+      '- 项目进展：今天做了什么、决定了什么、遇到了什么问题',
+      '- 技术决策：选型理由、架构方案、变更记录',
+      '- 待办与承诺：约定事项、截止日期、后续跟进',
+      '- 会议/讨论要点：关键结论、行动项',
+      '',
+      '`memory_append` 自动保存到独立的记忆目录（不在工作区内）。',
+      '',
+      '#### 判断标准',
+      '> 问自己：**半年后这条信息还有用吗？**',
+      '> - 是 → 全局记忆（编辑 CLAUDE.md）',
+      '> - 否/不确定 → 日期记忆（memory_append）',
+      '',
+      '系统也会在上下文压缩前提示你保存记忆。',
+    ].join('\n');
+  }
+  return [
+    '',
+    '## 记忆',
+    '',
+    '可使用 `memory_search` 和 `memory_get` 工具搜索记忆文件。',
+    '获知重要信息（项目决策、待办、讨论要点等）时，**必须立即**调用 `memory_append` 保存。',
+    '不要等待——获知后立刻存储。',
+    '全局记忆（`/workspace/global/CLAUDE.md`）为只读，无法直接修改。',
+  ].join('\n');
+}
+
+/**
+ * Run a single query and stream results via writeOutput.
+ * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
+ * allowing agent teams subagents to run to completion.
+ * Also pipes IPC messages into the stream during the query.
+ */
+async function runQuery(
+  prompt: string,
+  sessionId: string | undefined,
+  mcpServerPath: string,
+  containerInput: ContainerInput,
+  memoryRecall: string,
+  resumeAt?: string,
+  emitOutput = true,
+  allowedTools: string[] = DEFAULT_ALLOWED_TOOLS,
+  disallowedTools?: string[],
+  images?: Array<{ data: string; mimeType?: string }>,
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean }> {
+  const stream = new MessageStream();
+  stream.push(prompt, images);
+  const emit = (output: ContainerOutput): void => {
+    if (emitOutput) writeOutput(output);
+  };
+
+  // Poll IPC for follow-up messages and _close sentinel during the query
+  let ipcPolling = true;
+  let closedDuringQuery = false;
+  const pollIpcDuringQuery = () => {
+    if (!ipcPolling) return;
+    if (shouldClose()) {
+      log('Close sentinel detected during query, ending stream');
+      closedDuringQuery = true;
+      stream.end();
+      ipcPolling = false;
+      return;
+    }
+    const messages = drainIpcInput();
+    for (const msg of messages) {
+      log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
+      stream.push(msg.text, msg.images);
+    }
+    setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+  };
+  setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+
+  // 文本聚合缓冲区 - 流式事件批量发送
+  let textBuf = '', thinkBuf = '';
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  const FLUSH_MS = 100, FLUSH_CHARS = 200;
+
+  function flushBuffers() {
+    if (textBuf) {
+      emit({ status: 'stream', result: null, streamEvent: { eventType: 'text_delta', text: textBuf } });
+      textBuf = '';
+    }
+    if (thinkBuf) {
+      emit({ status: 'stream', result: null, streamEvent: { eventType: 'thinking_delta', text: thinkBuf } });
+      thinkBuf = '';
+    }
+    flushTimer = null;
+  }
+
+  function scheduleFlush() {
+    if (textBuf.length >= FLUSH_CHARS || thinkBuf.length >= FLUSH_CHARS) {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      flushBuffers();
+    } else if (!flushTimer) {
+      flushTimer = setTimeout(flushBuffers, FLUSH_MS);
+    }
+  }
+
+  function shorten(input: string, maxLen = 180): string {
+    if (input.length <= maxLen) return input;
+    return `${input.slice(0, maxLen)}...`;
+  }
+
+  function redactSensitive(input: unknown, depth = 0): unknown {
+    if (depth > 3) return '[truncated]';
+    if (input == null) return input;
+    if (typeof input === 'string' || typeof input === 'number' || typeof input === 'boolean') {
+      return input;
+    }
+    if (Array.isArray(input)) {
+      return input.slice(0, 10).map((item) => redactSensitive(item, depth + 1));
+    }
+    if (typeof input === 'object') {
+      const obj = input as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(obj)) {
+        if (/(token|password|secret|api[_-]?key|authorization|cookie)/iu.test(k)) {
+          out[k] = '[REDACTED]';
+        } else {
+          out[k] = redactSensitive(v, depth + 1);
+        }
+      }
+      return out;
+    }
+    return '[unsupported]';
+  }
+
+  function summarizeToolInput(input: unknown): string | undefined {
+    if (input == null) return undefined;
+
+    if (typeof input === 'string') {
+      return shorten(input.trim());
+    }
+
+    if (typeof input === 'object') {
+      const obj = input as Record<string, unknown>;
+      const keyCandidates = ['command', 'query', 'path', 'pattern', 'prompt', 'url', 'name'];
+      for (const key of keyCandidates) {
+        const value = obj[key];
+        if (typeof value === 'string' && value.trim()) {
+          return `${key}: ${shorten(value.trim())}`;
+        }
+      }
+      try {
+        const json = JSON.stringify(redactSensitive(obj));
+        // Skip empty or trivial objects (e.g. {} at content_block_start)
+        if (!json || json === '{}' || json === '[]') return undefined;
+        return shorten(json);
+      } catch {
+        return undefined;
+      }
+    }
+
+    return undefined;
+  }
+
+  function extractSkillName(toolName: unknown, input: unknown): string | undefined {
+    if (toolName !== 'Skill') return undefined;
+    if (!input || typeof input !== 'object') return undefined;
+    const obj = input as Record<string, unknown>;
+    const raw =
+      (typeof obj.skillName === 'string' && obj.skillName) ||
+      (typeof obj.skill === 'string' && obj.skill) ||
+      (typeof obj.name === 'string' && obj.name) ||
+      (typeof obj.command === 'string' && obj.command) ||
+      '';
+    if (!raw) return undefined;
+    const matched = raw.match(/\/([A-Za-z0-9._-]+)/);
+    if (matched && matched[1]) return matched[1];
+    return raw.replace(/^\/+/, '').trim() || undefined;
+  }
+
+  let newSessionId: string | undefined;
+  let lastAssistantUuid: string | undefined;
+  let messageCount = 0;
+  let resultCount = 0;
+
+  // Build system prompt: memory recall guidance + global CLAUDE.md (for non-main)
+  const globalClaudeMdPath = path.join(WORKSPACE_GLOBAL, 'CLAUDE.md');
+
+  let systemPromptAppend: string;
+  if (containerInput.isMain) {
+    systemPromptAppend = memoryRecall;
+  } else {
+    let globalClaudeMd = '';
+    if (fs.existsSync(globalClaudeMdPath)) {
+      globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+    }
+    systemPromptAppend = globalClaudeMd
+      ? `${globalClaudeMd}\n${memoryRecall}`
+      : memoryRecall;
+  }
+
+  // 追踪顶层工具执行状态（用于精确发送 tool_use_end）
+  let activeTopLevelToolUseId: string | null = null;
+
+  // 主会话可访问全局和记忆目录；非主会话仅访问记忆目录
+  // （非主会话的全局 CLAUDE.md 已通过 systemPromptAppend 注入，无需文件系统写权限）
+  const extraDirs = containerInput.isMain
+    ? [WORKSPACE_GLOBAL, WORKSPACE_MEMORY]
+    : [WORKSPACE_MEMORY];
+
+  try {
+    for await (const message of query({
+    prompt: stream,
+    options: {
+      cwd: WORKSPACE_GROUP,
+      additionalDirectories: extraDirs,
+      resume: sessionId,
+      resumeSessionAt: resumeAt,
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: systemPromptAppend },
+      allowedTools,
+      ...(disallowedTools && { disallowedTools }),
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      settingSources: ['project', 'user'],
+      includePartialMessages: true,
+      mcpServers: {
+        happyclaw: {
+          command: 'node',
+          args: [mcpServerPath],
+          env: {
+            HAPPYCLAW_CHAT_JID: containerInput.chatJid,
+            HAPPYCLAW_GROUP_FOLDER: containerInput.groupFolder,
+            HAPPYCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            HAPPYCLAW_WORKSPACE_GROUP: WORKSPACE_GROUP,
+            HAPPYCLAW_WORKSPACE_GLOBAL: WORKSPACE_GLOBAL,
+            HAPPYCLAW_WORKSPACE_MEMORY: WORKSPACE_MEMORY,
+            HAPPYCLAW_WORKSPACE_IPC: WORKSPACE_IPC,
+          },
+        },
+      },
+      hooks: {
+        PreCompact: [{ hooks: [createPreCompactHook(containerInput.isMain)] }]
+      },
+    }
+  })) {
+    // 流式事件处理
+    if (message.type === 'stream_event') {
+      const partial = message as any;
+      const parentToolUseId =
+        partial.parent_tool_use_id === undefined ? null : partial.parent_tool_use_id;
+      const isNested = parentToolUseId !== null;
+
+      const event = partial.event;
+      if (event.type === 'content_block_start') {
+        const block = event.content_block;
+        if (block?.type === 'tool_use') {
+          if (!isNested && activeTopLevelToolUseId && activeTopLevelToolUseId !== block.id) {
+            emit({
+              status: 'stream',
+              result: null,
+              streamEvent: { eventType: 'tool_use_end', toolUseId: activeTopLevelToolUseId },
+            });
+          }
+          if (!isNested) activeTopLevelToolUseId = block.id || null;
+
+          emit({
+            status: 'stream',
+            result: null,
+            streamEvent: {
+              eventType: 'tool_use_start',
+              toolName: block.name,
+              toolUseId: block.id,
+              parentToolUseId,
+              isNested,
+              skillName: extractSkillName(block.name, block.input),
+              toolInputSummary: summarizeToolInput(block.input),
+            },
+          });
+        } else if (block?.type === 'text') {
+          // 新的文本 block 开始意味着顶层工具已执行完毕
+          if (activeTopLevelToolUseId) {
+            emit({
+              status: 'stream',
+              result: null,
+              streamEvent: { eventType: 'tool_use_end', toolUseId: activeTopLevelToolUseId },
+            });
+            activeTopLevelToolUseId = null;
+          }
+        }
+      } else if (event.type === 'content_block_delta') {
+        const delta = event.delta;
+        if (delta?.type === 'text_delta' && delta.text) {
+          textBuf += delta.text;
+          scheduleFlush();
+        } else if (delta?.type === 'thinking_delta' && delta.thinking) {
+          thinkBuf += delta.thinking;
+          scheduleFlush();
+        }
+      }
+      continue; // stream_event 不走后续处理
+    }
+
+    if (message.type === 'tool_progress') {
+      const tp = message as any;
+      const parentToolUseId =
+        tp.parent_tool_use_id === undefined ? null : tp.parent_tool_use_id;
+      emit({
+        status: 'stream',
+        result: null,
+        streamEvent: {
+          eventType: 'tool_progress',
+          toolName: tp.tool_name,
+          toolUseId: tp.tool_use_id,
+          parentToolUseId,
+          isNested: parentToolUseId !== null,
+          elapsedSeconds: tp.elapsed_time_seconds,
+        },
+      });
+      continue;
+    }
+
+    if (message.type === 'tool_use_summary') {
+      const summary = message as any;
+      const ids = Array.isArray(summary.preceding_tool_use_ids)
+        ? summary.preceding_tool_use_ids.filter((id: unknown): id is string => typeof id === 'string')
+        : [];
+      for (const id of ids) {
+        emit({
+          status: 'stream',
+          result: null,
+          streamEvent: { eventType: 'tool_use_end', toolUseId: id },
+        });
+        if (activeTopLevelToolUseId === id) {
+          activeTopLevelToolUseId = null;
+        }
+      }
+      continue;
+    }
+
+    // Hook 事件
+    if (message.type === 'system') {
+      const sys = message as any;
+      if (sys.subtype === 'status') {
+        const statusText = sys.status?.type || null;
+        emit({ status: 'stream', result: null, streamEvent: { eventType: 'status', statusText } });
+        continue;
+      }
+      if (sys.subtype === 'hook_started') {
+        emit({
+          status: 'stream',
+          result: null,
+          streamEvent: {
+            eventType: 'hook_started',
+            hookName: sys.hook_name,
+            hookEvent: sys.hook_event,
+          },
+        });
+        continue;
+      }
+      if (sys.subtype === 'hook_progress') {
+        emit({
+          status: 'stream',
+          result: null,
+          streamEvent: {
+            eventType: 'hook_progress',
+            hookName: sys.hook_name,
+            hookEvent: sys.hook_event,
+          },
+        });
+        continue;
+      }
+      if (sys.subtype === 'hook_response') {
+        emit({
+          status: 'stream',
+          result: null,
+          streamEvent: {
+            eventType: 'hook_response',
+            hookName: sys.hook_name,
+            hookEvent: sys.hook_event,
+            hookOutcome: sys.outcome,
+          },
+        });
+        continue;
+      }
+    }
+
+    messageCount++;
+    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
+    log(`[msg #${messageCount}] type=${msgType}`);
+
+    if (message.type === 'assistant' && 'uuid' in message) {
+      lastAssistantUuid = (message as { uuid: string }).uuid;
+    }
+
+    if (message.type === 'system' && message.subtype === 'init') {
+      newSessionId = message.session_id;
+      log(`Session initialized: ${newSessionId}`);
+    }
+
+    if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
+      const tn = message as { task_id: string; status: string; summary: string };
+      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+    }
+
+    if (message.type === 'result') {
+      resultCount++;
+      const textResult = 'result' in message ? (message as { result?: string }).result : null;
+      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      emit({
+        status: 'success',
+        result: textResult || null,
+        newSessionId
+      });
+    }
+  }
+
+  // 清理：先取消 pending timer，再 flush 剩余缓冲区，最后清除残留工具状态
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  flushBuffers();
+  if (activeTopLevelToolUseId) {
+    emit({
+      status: 'stream',
+      result: null,
+      streamEvent: { eventType: 'tool_use_end', toolUseId: activeTopLevelToolUseId },
+    });
+  }
+
+  ipcPolling = false;
+  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
+  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  } catch (err) {
+    ipcPolling = false;
+    const errorMessage = err instanceof Error ? err.message : String(err);
+
+    // 检测上下文溢出错误
+    if (isContextOverflowError(errorMessage)) {
+      log(`Context overflow detected: ${errorMessage}`);
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true };
+    }
+
+    // 其他错误继续抛出
+    throw err;
+  }
+}
+
+async function main(): Promise<void> {
+  let containerInput: ContainerInput;
+
+  try {
+    const stdinData = await readStdin();
+    containerInput = JSON.parse(stdinData);
+    log(`Received input for group: ${containerInput.groupFolder}`);
+  } catch (err) {
+    writeOutput({
+      status: 'error',
+      result: null,
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+    });
+    process.exit(1);
+  }
+
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
+
+  let sessionId = containerInput.sessionId;
+  const memoryRecallPrompt = buildMemoryRecallPrompt(containerInput.isMain);
+  fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+
+  // Clean up stale _close sentinel from previous container runs
+  try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
+
+  // Build initial prompt (drain any pending IPC messages too)
+  let prompt = containerInput.prompt;
+  let promptImages = containerInput.images;
+  if (containerInput.isScheduledTask) {
+    prompt = `[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。]\n\n${prompt}`;
+  }
+  const pending = drainIpcInput();
+  if (pending.length > 0) {
+    log(`Draining ${pending.length} pending IPC messages into initial prompt`);
+    prompt += '\n' + pending.map((m) => m.text).join('\n');
+    const pendingImages = pending.flatMap((m) => m.images || []);
+    if (pendingImages.length > 0) {
+      promptImages = [...(promptImages || []), ...pendingImages];
+    }
+  }
+
+  // Query loop: run query → wait for IPC message → run new query → repeat
+  let resumeAt: string | undefined;
+  let overflowRetryCount = 0;
+  const MAX_OVERFLOW_RETRIES = 3;
+  try {
+    while (true) {
+      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+
+      const queryResult = await runQuery(
+        prompt,
+        sessionId,
+        mcpServerPath,
+        containerInput,
+        memoryRecallPrompt,
+        resumeAt,
+        true,
+        DEFAULT_ALLOWED_TOOLS,
+        undefined,
+        promptImages,
+      );
+      if (queryResult.newSessionId) {
+        sessionId = queryResult.newSessionId;
+      }
+      if (queryResult.lastAssistantUuid) {
+        resumeAt = queryResult.lastAssistantUuid;
+      }
+
+      // 检查上下文溢出
+      if (queryResult.contextOverflow) {
+        overflowRetryCount++;
+        log(`Context overflow detected, retry ${overflowRetryCount}/${MAX_OVERFLOW_RETRIES}`);
+
+        if (overflowRetryCount >= MAX_OVERFLOW_RETRIES) {
+          const errorMsg = `上下文溢出错误：已重试 ${MAX_OVERFLOW_RETRIES} 次仍失败。请联系管理员检查 CLAUDE.md 大小或减少会话历史。`;
+          log(errorMsg);
+          writeOutput({
+            status: 'error',
+            result: null,
+            error: `context_overflow: ${errorMsg}`,
+            newSessionId: sessionId,
+          });
+          process.exit(1);
+        }
+
+        // 未超过重试次数，继续下一轮循环（会触发自动压缩）
+        log('Retrying query after context overflow (will trigger auto-compaction)...');
+        continue;
+      }
+
+      // 成功执行后重置溢出重试计数器
+      overflowRetryCount = 0;
+
+      // If _close was consumed during the query, exit immediately.
+      // Don't emit a session-update marker (it would reset the host's
+      // idle timer and cause a 30-min delay before the next _close).
+      if (queryResult.closedDuringQuery) {
+        log('Close sentinel consumed during query, exiting');
+        break;
+      }
+
+      // Memory Flush: run an extra query to let agent save durable memories
+      if (needsMemoryFlush && containerInput.isMain) {
+        needsMemoryFlush = false;
+        log('Running memory flush query after compaction...');
+
+        const today = new Date().toISOString().split('T')[0];
+        const flushPrompt = [
+          '上下文压缩前记忆刷新。',
+          `请使用 memory_append 将时效性记忆保存到 memory/${today}.md（项目进展、技术决策、待办事项等）。`,
+          '如果有长期不变的重要信息（用户身份、永久偏好）尚未写入全局记忆，请用 Edit 工具更新 /workspace/global/CLAUDE.md。',
+          '如需确认上下文，可先用 memory_search/memory_get 查阅。',
+          '如果没有值得保存的内容，回复一个字：OK。',
+        ].join(' ');
+
+        const flushResult = await runQuery(
+          flushPrompt,
+          sessionId,
+          mcpServerPath,
+          containerInput,
+          memoryRecallPrompt,
+          resumeAt,
+          false,
+          MEMORY_FLUSH_ALLOWED_TOOLS,
+          MEMORY_FLUSH_DISALLOWED_TOOLS,
+        );
+        if (flushResult.newSessionId) sessionId = flushResult.newSessionId;
+        if (flushResult.lastAssistantUuid) resumeAt = flushResult.lastAssistantUuid;
+        log('Memory flush completed');
+
+        if (flushResult.closedDuringQuery) {
+          log('Close sentinel during memory flush, exiting');
+          break;
+        }
+      }
+
+      // Emit session update so host can track it
+      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+
+      log('Query ended, waiting for next IPC message...');
+
+      // Wait for the next message or _close sentinel
+      const nextMessage = await waitForIpcMessage();
+      if (nextMessage === null) {
+        log('Close sentinel received, exiting');
+        break;
+      }
+
+      log(`Got new message (${nextMessage.text.length} chars, ${nextMessage.images?.length || 0} images), starting new query`);
+      prompt = nextMessage.text;
+      promptImages = nextMessage.images;
+    }
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log(`Agent error: ${errorMessage}`);
+    // 不在 error output 中携带 sessionId：
+    // 流式输出已通过 onOutput 回调传递了有效的 session 更新。
+    // 如果这里携带的是 throw 前的旧 sessionId，会覆盖中间成功产生的新 session。
+    writeOutput({
+      status: 'error',
+      result: null,
+      error: errorMessage
+    });
+    process.exit(1);
+  }
+}
+
+main();

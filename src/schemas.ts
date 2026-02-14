@@ -1,0 +1,258 @@
+// Zod schemas and validation types for API requests
+
+import { z } from 'zod';
+import { ALL_PERMISSIONS } from './permissions.js';
+import type { Permission } from './types.js';
+import { MAX_GROUP_NAME_LEN } from './web-context.js';
+
+export const TaskPatchSchema = z.object({
+  prompt: z.string().optional(),
+  schedule_type: z.enum(['cron', 'interval', 'once']).optional(),
+  schedule_value: z.string().optional(),
+  context_mode: z.enum(['group', 'isolated']).optional(),
+  status: z.enum(['active', 'paused']).optional(),
+  next_run: z.string().optional(),
+});
+
+export const TaskCreateSchema = z.object({
+  group_folder: z.string().min(1),
+  chat_jid: z.string().min(1),
+  prompt: z.string().min(1),
+  schedule_type: z.enum(['cron', 'interval', 'once']),
+  schedule_value: z.string().min(1),
+  context_mode: z.enum(['group', 'isolated']).optional(),
+});
+
+// 单张图片附件上限 5MB（base64 编码后约 6.67MB）
+const MAX_IMAGE_BASE64_LENGTH = 5 * 1024 * 1024 * 4 / 3; // ~6.67M chars
+
+export const MessageAttachmentSchema = z.object({
+  type: z.literal('image'),
+  data: z.string().min(1).max(MAX_IMAGE_BASE64_LENGTH),
+  mimeType: z.string().regex(/^image\//).optional(),
+});
+
+export const MessageCreateSchema = z.object({
+  chatJid: z.string().min(1),
+  content: z.string().optional().default(''),
+  attachments: z.array(MessageAttachmentSchema).max(10).optional(),
+}).superRefine((data, ctx) => {
+  const hasContent = data.content.trim().length > 0;
+  const hasAttachments = (data.attachments?.length ?? 0) > 0;
+  if (!hasContent && !hasAttachments) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['content'],
+      message: 'content or attachments is required',
+    });
+  }
+});
+
+export const GroupCreateSchema = z.object({
+  name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
+  execution_mode: z.enum(['container', 'host']).optional(),
+  custom_cwd: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  init_source_path: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  init_git_url: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+});
+
+export const MemoryFileSchema = z.object({
+  path: z.string().min(1),
+  content: z.string(),
+});
+
+export const MemoryGlobalSchema = z.object({
+  content: z.string(),
+});
+
+export const ClaudeConfigSchema = z.object({
+  anthropicBaseUrl: z.string(),
+});
+
+export const GroupPatchSchema = z.object({
+  name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
+});
+
+export const LoginSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+
+export const RegisterSchema = z.object({
+  username: z.string().min(3).max(32),
+  password: z.string().min(8).max(128),
+  display_name: z.string().max(64).optional(),
+  invite_code: z.string().min(1).optional(),
+});
+
+export const RegistrationConfigSchema = z.object({
+  allowRegistration: z.boolean(),
+  requireInviteCode: z.boolean(),
+});
+
+export const ChangePasswordSchema = z.object({
+  current_password: z.string().min(1),
+  new_password: z.string().min(8).max(128),
+});
+
+export const ProfileUpdateSchema = z.object({
+  username: z.string().min(3).max(32).optional(),
+  display_name: z.string().max(64).optional(),
+});
+
+export const PermissionValueSchema = z
+  .string()
+  .refine(
+    (value): value is Permission =>
+      (ALL_PERMISSIONS as string[]).includes(value),
+    {
+      message: 'Invalid permission',
+    },
+  );
+
+export const AdminCreateUserSchema = z.object({
+  username: z.string().min(3).max(32),
+  password: z.string().min(8).max(128),
+  display_name: z.string().max(64).optional(),
+  role: z.enum(['admin', 'member']).optional(),
+  permissions: z
+    .array(PermissionValueSchema)
+    .max(ALL_PERMISSIONS.length)
+    .optional(),
+  must_change_password: z.boolean().optional(),
+  notes: z.string().max(2000).optional(),
+});
+
+export const AdminPatchUserSchema = z.object({
+  role: z.enum(['admin', 'member']).optional(),
+  status: z.enum(['active', 'disabled', 'deleted']).optional(),
+  display_name: z.string().max(64).optional(),
+  password: z.string().min(8).max(128).optional(),
+  permissions: z
+    .array(PermissionValueSchema)
+    .max(ALL_PERMISSIONS.length)
+    .optional(),
+  disable_reason: z.string().max(256).nullable().optional(),
+  notes: z.string().max(2000).nullable().optional(),
+});
+
+export const InviteCreateSchema = z.object({
+  role: z.enum(['admin', 'member']).optional(),
+  permission_template: z
+    .enum(['admin_full', 'member_basic', 'ops_manager', 'user_admin'])
+    .optional(),
+  permissions: z
+    .array(PermissionValueSchema)
+    .max(ALL_PERMISSIONS.length)
+    .optional(),
+  max_uses: z.number().int().min(0).max(1000).optional(),
+  expires_in_hours: z.number().int().min(1).max(8760).optional(),
+});
+
+export const ClaudeSecretsSchema = z
+  .object({
+    anthropicAuthToken: z.string().optional(),
+    clearAnthropicAuthToken: z.boolean().optional(),
+    anthropicApiKey: z.string().optional(),
+    clearAnthropicApiKey: z.boolean().optional(),
+    claudeCodeOauthToken: z.string().optional(),
+    clearClaudeCodeOauthToken: z.boolean().optional(),
+  })
+  .refine(
+    (data) => {
+      const hasAnthropicAuthToken =
+        typeof data.anthropicAuthToken === 'string' ||
+        data.clearAnthropicAuthToken === true;
+      const hasAnthropicApiKey =
+        typeof data.anthropicApiKey === 'string' ||
+        data.clearAnthropicApiKey === true;
+      const hasClaudeCodeOauthToken =
+        typeof data.claudeCodeOauthToken === 'string' ||
+        data.clearClaudeCodeOauthToken === true;
+      return (
+        hasAnthropicAuthToken || hasAnthropicApiKey || hasClaudeCodeOauthToken
+      );
+    },
+    { message: 'At least one secret field must be provided' },
+  );
+
+export const FeishuConfigSchema = z
+  .object({
+    appId: z.string().max(2000).optional(),
+    appSecret: z.string().max(2000).optional(),
+    clearAppSecret: z.boolean().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine(
+    (data) =>
+      typeof data.appId === 'string' ||
+      typeof data.appSecret === 'string' ||
+      data.clearAppSecret === true ||
+      typeof data.enabled === 'boolean',
+    { message: 'At least one config field must be provided' },
+  );
+
+export const TelegramConfigSchema = z
+  .object({
+    botToken: z.string().max(2000).optional(),
+    clearBotToken: z.boolean().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine(
+    (data) =>
+      typeof data.botToken === 'string' ||
+      data.clearBotToken === true ||
+      typeof data.enabled === 'boolean',
+    { message: 'At least one config field must be provided' },
+  );
+
+export const ClaudeCustomEnvSchema = z.object({
+  customEnv: z.record(z.string().max(256), z.string().max(4096)),
+});
+
+export const ContainerEnvSchema = z.object({
+  anthropicBaseUrl: z.string().max(2000).optional(),
+  anthropicAuthToken: z.string().max(2000).optional(),
+  anthropicApiKey: z.string().max(2000).optional(),
+  claudeCodeOauthToken: z.string().max(2000).optional(),
+  customEnv: z
+    .record(z.string().max(256), z.string().max(4096))
+    .optional()
+    .refine((env) => !env || Object.keys(env).length <= 50, {
+      message: 'customEnv must have at most 50 entries',
+    }),
+});
+
+// Memory types
+export interface MemorySource {
+  path: string;
+  label: string;
+  scope: 'global' | 'main' | 'flow' | 'session';
+  kind: 'claude' | 'note' | 'session';
+  writable: boolean;
+  exists: boolean;
+  updatedAt: string | null;
+  size: number;
+}
+
+export interface MemoryFilePayload {
+  path: string;
+  content: string;
+  updatedAt: string | null;
+  size: number;
+  writable: boolean;
+}
+
+export interface MemorySearchHit extends MemorySource {
+  hits: number;
+  snippet: string;
+}

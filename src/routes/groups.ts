@@ -1,0 +1,899 @@
+import { Hono } from 'hono';
+import type { Variables } from '../web-context.js';
+import { authMiddleware } from '../middleware/auth.js';
+import {
+  GroupCreateSchema,
+  GroupPatchSchema,
+  ContainerEnvSchema,
+} from '../schemas.js';
+import type { AuthUser, RegisteredGroup, ExecutionMode } from '../types.js';
+import {
+  isHostExecutionGroup,
+  hasHostExecutionPermission,
+  MAX_GROUP_NAME_LEN,
+  getWebDeps,
+} from '../web-context.js';
+import {
+  getRegisteredGroup,
+  setRegisteredGroup,
+  deleteRegisteredGroup,
+  getAllRegisteredGroups,
+  getAllChats,
+  getJidsByFolder,
+  updateChatName,
+  deleteSession,
+  deleteChatHistory,
+  deleteGroupData,
+  ensureChatExists,
+  storeMessageDirect,
+  getMessagesPage,
+  getMessagesAfter,
+  getMessagesPageMulti,
+  getMessagesAfterMulti,
+} from '../db.js';
+import { logger } from '../logger.js';
+import {
+  getContainerEnvConfig,
+  saveContainerEnvConfig,
+  deleteContainerEnvConfig,
+  toPublicContainerEnvConfig,
+} from '../runtime-config.js';
+import {
+  loadMountAllowlist,
+  findAllowedRoot,
+  matchesBlockedPattern,
+} from '../mount-security.js';
+import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { z } from 'zod';
+import { broadcastNewMessage } from '../web.js';
+
+const groupRoutes = new Hono<{ Variables: Variables }>();
+
+// --- Helper functions ---
+
+function normalizeGroupName(name: unknown): string {
+  if (typeof name !== 'string') return '';
+  return name.trim().slice(0, MAX_GROUP_NAME_LEN);
+}
+
+function buildGroupsPayload(user: AuthUser): Record<
+  string,
+  {
+    name: string;
+    folder: string;
+    added_at: string;
+    kind: 'main' | 'feishu' | 'web';
+    editable: boolean;
+    deletable: boolean;
+    lastMessage?: string;
+    lastMessageTime?: string;
+    execution_mode: 'container' | 'host';
+    custom_cwd?: string;
+  }
+> {
+  const groups = getAllRegisteredGroups();
+  const chats = new Map(getAllChats().map((chat) => [chat.jid, chat]));
+  const isAdmin = hasHostExecutionPermission(user);
+
+  const result: Record<
+    string,
+    {
+      name: string;
+      folder: string;
+      added_at: string;
+      kind: 'main' | 'feishu' | 'web';
+      editable: boolean;
+      deletable: boolean;
+      lastMessage?: string;
+      lastMessageTime?: string;
+      execution_mode: 'container' | 'host';
+      custom_cwd?: string;
+    }
+  > = {};
+
+  for (const [jid, group] of Object.entries(groups)) {
+    const isMain = group.folder === 'main';
+    const isWeb = jid.startsWith('web:');
+    const isHost = isHostExecutionGroup(group);
+
+    // 隐藏自动注册到主容器的飞书群组（它们共享主容器会话，不是独立流）
+    if (isMain && !isWeb) continue;
+
+    // Non-admin users: skip host groups entirely
+    if (isHost && !isAdmin) continue;
+
+    const latest = getMessagesPage(jid, undefined, 1)[0];
+
+    result[jid] = {
+      name: group.name,
+      folder: group.folder,
+      added_at: group.added_at,
+      kind: isMain ? 'main' : isWeb ? 'web' : 'feishu',
+      editable: isWeb && !isMain,
+      deletable: isWeb && !isMain,
+      lastMessage: latest?.content,
+      lastMessageTime:
+        latest?.timestamp ||
+        chats.get(jid)?.last_message_time ||
+        group.added_at,
+      execution_mode: group.executionMode || 'container',
+      custom_cwd: isAdmin ? group.customCwd : undefined,
+    };
+  }
+
+  return result;
+}
+
+function removeFlowArtifacts(folder: string): void {
+  const DATA_DIR = path.join(process.cwd(), 'data');
+  const GROUPS_DIR = path.join(process.cwd(), 'groups');
+
+  fs.rmSync(path.join(GROUPS_DIR, folder), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA_DIR, 'sessions', folder), {
+    recursive: true,
+    force: true,
+  });
+  fs.rmSync(path.join(DATA_DIR, 'ipc', folder), {
+    recursive: true,
+    force: true,
+  });
+  fs.rmSync(path.join(DATA_DIR, 'env', folder), {
+    recursive: true,
+    force: true,
+  });
+  fs.rmSync(path.join(DATA_DIR, 'memory', folder), {
+    recursive: true,
+    force: true,
+  });
+  deleteContainerEnvConfig(folder);
+}
+
+function clearSessionJsonlFiles(folder: string): void {
+  const DATA_DIR = path.join(process.cwd(), 'data');
+  const claudeDir = path.join(DATA_DIR, 'sessions', folder, '.claude');
+  if (!fs.existsSync(claudeDir)) return;
+
+  // 保留 settings.json，清除所有其他运行时文件和目录
+  const keep = new Set(['settings.json']);
+  const entries = fs.readdirSync(claudeDir);
+  for (const entry of entries) {
+    if (keep.has(entry)) continue;
+    const fullPath = path.join(claudeDir, entry);
+    fs.rmSync(fullPath, { recursive: true, force: true });
+  }
+}
+
+function resetWorkspaceForGroup(folder: string): void {
+  const DATA_DIR = path.join(process.cwd(), 'data');
+  const GROUPS_DIR = path.join(process.cwd(), 'groups');
+
+  // 1. 清除工作目录（Agent 文件、CLAUDE.md、logs/ 等），然后重建空目录
+  const groupDir = path.join(GROUPS_DIR, folder);
+  fs.rmSync(groupDir, { recursive: true, force: true });
+  fs.mkdirSync(groupDir, { recursive: true });
+
+  // 2. 清除整个 Claude 会话目录（下次启动时 container-runner 会重建）
+  fs.rmSync(path.join(DATA_DIR, 'sessions', folder), {
+    recursive: true,
+    force: true,
+  });
+
+  // 3. 清除 IPC 残留并重建目录结构
+  const ipcDir = path.join(DATA_DIR, 'ipc', folder);
+  fs.rmSync(ipcDir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(ipcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(ipcDir, 'messages'), { recursive: true });
+  fs.mkdirSync(path.join(ipcDir, 'tasks'), { recursive: true });
+
+  // 4. 清除日期记忆目录（data/memory/{folder}/）
+  fs.rmSync(path.join(DATA_DIR, 'memory', folder), {
+    recursive: true,
+    force: true,
+  });
+}
+
+function toPublicContainerEnvForUser(
+  config: ReturnType<typeof getContainerEnvConfig>,
+  user: AuthUser,
+) {
+  const base = toPublicContainerEnvConfig(config);
+  if (
+    user.role === 'admin' ||
+    (user.permissions && user.permissions.includes('manage_group_env'))
+  ) {
+    return base;
+  }
+  return {
+    ...base,
+    customEnv: {},
+  };
+}
+
+// --- Routes ---
+
+// GET /api/groups - 获取群组列表
+groupRoutes.get('/', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const groups = buildGroupsPayload(user);
+  return c.json({ groups });
+});
+
+// POST /api/groups - 创建新群组
+groupRoutes.post('/', authMiddleware, async (c) => {
+  const deps = getWebDeps();
+  if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+
+  const body = await c.req.json().catch(() => ({}));
+
+  const validation = GroupCreateSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+
+  const name = normalizeGroupName(validation.data.name);
+  if (!name) {
+    return c.json({ error: 'Group name is required' }, 400);
+  }
+
+  const executionMode = validation.data.execution_mode || 'container';
+  const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
+  const initSourcePath = validation.data.init_source_path;
+  const initGitUrl = validation.data.init_git_url;
+  const authUser = c.get('user') as AuthUser;
+
+  // 互斥校验：init_source_path 和 init_git_url 不能同时指定
+  if (initSourcePath && initGitUrl) {
+    return c.json(
+      { error: 'init_source_path and init_git_url are mutually exclusive' },
+      400,
+    );
+  }
+
+  // init_source_path / init_git_url 仅 container 模式可用
+  if (executionMode === 'host' && (initSourcePath || initGitUrl)) {
+    return c.json(
+      { error: 'init_source_path and init_git_url are only valid for container mode' },
+      400,
+    );
+  }
+
+  if (executionMode === 'host') {
+    if (!hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions for host execution mode' },
+        403,
+      );
+    }
+    if (customCwd) {
+      if (!path.isAbsolute(customCwd)) {
+        return c.json({ error: 'custom_cwd must be an absolute path' }, 400);
+      }
+
+      // 检查路径是否存在
+      let realPath: string;
+      try {
+        const stat = fs.statSync(customCwd);
+        if (!stat.isDirectory()) {
+          return c.json(
+            { error: 'custom_cwd must be an existing directory' },
+            400,
+          );
+        }
+        realPath = fs.realpathSync(customCwd);
+      } catch {
+        return c.json({ error: 'custom_cwd directory does not exist' }, 400);
+      }
+
+      // 白名单校验：检查路径是否在允许的根目录下
+      const allowlist = loadMountAllowlist();
+      if (allowlist && allowlist.allowedRoots && allowlist.allowedRoots.length > 0) {
+        let allowed = false;
+        for (const root of allowlist.allowedRoots) {
+          const expandedRoot = root.path.startsWith('~')
+            ? path.join(
+                process.env.HOME || '/Users/user',
+                root.path.slice(root.path.startsWith('~/') ? 2 : 1),
+              )
+            : path.resolve(root.path);
+
+          let realRoot: string;
+          try {
+            realRoot = fs.realpathSync(expandedRoot);
+          } catch {
+            continue; // 允许的根目录不存在，跳过
+          }
+
+          const relative = path.relative(realRoot, realPath);
+          if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+            allowed = true;
+            break;
+          }
+        }
+
+        if (!allowed) {
+          const allowedPaths = allowlist.allowedRoots.map((r) => r.path).join(', ');
+          return c.json(
+            {
+              error: `custom_cwd must be under an allowed root. Allowed roots: ${allowedPaths}. Check config/mount-allowlist.json`,
+            },
+            403,
+          );
+        }
+      }
+    }
+  } else if (customCwd) {
+    return c.json({ error: 'custom_cwd is only valid for host mode' }, 400);
+  }
+
+  // 验证 init_source_path
+  if (initSourcePath) {
+    if (!hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions: init_source_path requires admin' },
+        403,
+      );
+    }
+    if (!path.isAbsolute(initSourcePath)) {
+      return c.json({ error: 'init_source_path must be an absolute path' }, 400);
+    }
+
+    let realPath: string;
+    try {
+      const stat = fs.statSync(initSourcePath);
+      if (!stat.isDirectory()) {
+        return c.json({ error: 'init_source_path must be an existing directory' }, 400);
+      }
+      realPath = fs.realpathSync(initSourcePath);
+    } catch {
+      return c.json({ error: 'init_source_path directory does not exist' }, 400);
+    }
+
+    // 白名单校验
+    const allowlist = loadMountAllowlist();
+    if (allowlist && allowlist.allowedRoots && allowlist.allowedRoots.length > 0) {
+      const allowedRoot = findAllowedRoot(realPath, allowlist.allowedRoots);
+      if (!allowedRoot) {
+        const allowedPaths = allowlist.allowedRoots.map((r) => r.path).join(', ');
+        return c.json(
+          {
+            error: `init_source_path must be under an allowed root. Allowed roots: ${allowedPaths}. Check config/mount-allowlist.json`,
+          },
+          403,
+        );
+      }
+
+      // 敏感路径过滤
+      const blockedMatch = matchesBlockedPattern(realPath, allowlist.blockedPatterns);
+      if (blockedMatch) {
+        return c.json(
+          { error: `init_source_path matches blocked pattern "${blockedMatch}"` },
+          403,
+        );
+      }
+    }
+  }
+
+  // 验证 init_git_url
+  if (initGitUrl) {
+    if (initGitUrl.length > 2000) {
+      return c.json({ error: 'init_git_url is too long (max 2000 characters)' }, 400);
+    }
+    if (!initGitUrl.startsWith('https://')) {
+      return c.json({ error: 'init_git_url must be an HTTPS URL' }, 400);
+    }
+  }
+
+  const jid = `web:${crypto.randomUUID()}`;
+  const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const now = new Date().toISOString();
+
+  const group: RegisteredGroup = {
+    name,
+    folder,
+    added_at: now,
+    executionMode: executionMode as ExecutionMode,
+    customCwd: executionMode === 'host' ? customCwd : undefined,
+    initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
+    initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
+  };
+
+  setRegisteredGroup(jid, group);
+  updateChatName(jid, name);
+  deps.getRegisteredGroups()[jid] = group;
+
+  // 工作区初始化
+  const GROUPS_DIR = path.join(process.cwd(), 'groups');
+  const groupDir = path.join(GROUPS_DIR, folder);
+
+  try {
+    if (initSourcePath) {
+      fs.mkdirSync(groupDir, { recursive: true });
+      fs.cpSync(initSourcePath, groupDir, { recursive: true });
+      logger.info({ folder, source: initSourcePath }, 'Workspace initialized from local directory');
+    }
+
+    if (initGitUrl) {
+      execFileSync('git', ['clone', '--depth', '1', initGitUrl, groupDir], {
+        timeout: 120_000,
+        stdio: 'pipe',
+      });
+      logger.info({ folder, url: initGitUrl }, 'Workspace initialized from git clone');
+    }
+  } catch (err) {
+    // 初始化失败时清理
+    logger.error({ folder, err }, 'Workspace initialization failed, cleaning up');
+    fs.rmSync(groupDir, { recursive: true, force: true });
+    deleteRegisteredGroup(jid);
+    deleteChatHistory(jid);
+    delete deps.getRegisteredGroups()[jid];
+
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return c.json(
+      { error: `Workspace initialization failed: ${errMsg}` },
+      500,
+    );
+  }
+
+  return c.json({
+    success: true,
+    jid,
+    group: {
+      name: group.name,
+      folder: group.folder,
+      added_at: group.added_at,
+      execution_mode: group.executionMode || 'container',
+      custom_cwd: hasHostExecutionPermission(authUser)
+        ? group.customCwd
+        : undefined,
+      kind: 'web',
+      editable: true,
+      deletable: true,
+      lastMessage: undefined,
+      lastMessageTime: now,
+    },
+  });
+});
+
+// PATCH /api/groups/:jid - 重命名群组
+groupRoutes.patch('/:jid', authMiddleware, async (c) => {
+  const deps = getWebDeps();
+  if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+
+  const jid = c.req.param('jid');
+  const existing = getRegisteredGroup(jid);
+  if (!existing) return c.json({ error: 'Group not found' }, 404);
+
+  if (existing.folder === 'main' || !jid.startsWith('web:')) {
+    return c.json({ error: 'This group cannot be edited' }, 403);
+  }
+
+  const authUser = c.get('user') as AuthUser;
+  if (isHostExecutionGroup(existing) && !hasHostExecutionPermission(authUser)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const validation = GroupPatchSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+  const name = normalizeGroupName(validation.data.name);
+  if (!name) return c.json({ error: 'Group name is required' }, 400);
+
+  const updated: RegisteredGroup = {
+    name,
+    folder: existing.folder,
+    added_at: existing.added_at,
+    containerConfig: existing.containerConfig,
+    executionMode: existing.executionMode,
+    customCwd: existing.customCwd,
+  };
+
+  setRegisteredGroup(jid, updated);
+  updateChatName(jid, name);
+  deps.getRegisteredGroups()[jid] = updated;
+
+  return c.json({ success: true });
+});
+
+// DELETE /api/groups/:jid - 删除群组
+groupRoutes.delete('/:jid', authMiddleware, async (c) => {
+  const deps = getWebDeps();
+  if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+
+  const jid = c.req.param('jid');
+  const existing = getRegisteredGroup(jid);
+  if (!existing) return c.json({ error: 'Group not found' }, 404);
+
+  if (existing.folder === 'main' || !jid.startsWith('web:')) {
+    return c.json({ error: 'This group cannot be deleted' }, 403);
+  }
+
+  const authUser = c.get('user') as AuthUser;
+  if (isHostExecutionGroup(existing) && !hasHostExecutionPermission(authUser)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
+  }
+
+  // Wait for container to fully stop before cleaning up its files
+  try {
+    await deps.queue.stopGroup(jid);
+  } catch (err) {
+    logger.error(
+      { jid, err },
+      'Failed to stop container before deleting group',
+    );
+    return c.json(
+      { error: 'Failed to stop container, group not deleted' },
+      500,
+    );
+  }
+  deleteGroupData(jid, existing.folder);
+  removeFlowArtifacts(existing.folder);
+
+  delete deps.getRegisteredGroups()[jid];
+  delete deps.getSessions()[existing.folder];
+  deps.setLastAgentTimestamp(jid, { timestamp: '', id: '' });
+
+  return c.json({ success: true });
+});
+
+// POST /api/groups/:jid/reset-session - 重置会话上下文
+groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
+  const deps = getWebDeps();
+  if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+
+  const jid = c.req.param('jid');
+  const group = getRegisteredGroup(jid);
+  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const authUser = c.get('user') as AuthUser;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
+  }
+
+  // Collect all JIDs sharing the same folder (e.g., web:main + feishu groups)
+  const siblingJids = getJidsByFolder(group.folder);
+
+  // 1. Stop ALL running processes for this folder FIRST and WAIT for them to finish
+  //    to prevent any process from writing session files during cleanup
+  try {
+    await Promise.all(siblingJids.map((j) => deps.queue.stopGroup(j)));
+  } catch (err) {
+    logger.error(
+      { jid, siblingJids, err },
+      'Failed to stop containers before resetting session',
+    );
+    return c.json(
+      { error: 'Failed to stop container, session not reset' },
+      500,
+    );
+  }
+
+  // 2. Delete session JSONL files so Claude starts fresh.
+  // Do this before touching DB state to reduce partial-reset failure cases.
+  try {
+    clearSessionJsonlFiles(group.folder);
+  } catch (err) {
+    logger.error(
+      { jid, folder: group.folder, err },
+      'Failed to clear session files during reset',
+    );
+    return c.json(
+      { error: 'Failed to clear session files, session not reset' },
+      500,
+    );
+  }
+
+  // 3. Delete session from DB and in-memory cache.
+  try {
+    deleteSession(group.folder);
+    delete deps.getSessions()[group.folder];
+  } catch (err) {
+    logger.error(
+      { jid, folder: group.folder, err },
+      'Failed to clear session state during reset',
+    );
+    return c.json(
+      { error: 'Failed to clear session state, session not reset' },
+      500,
+    );
+  }
+
+  // 4. Insert system divider message (best-effort).
+  const dividerMessageId = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+  try {
+    ensureChatExists(jid);
+    storeMessageDirect(
+      dividerMessageId,
+      jid,
+      '__system__',
+      'system',
+      'context_reset',
+      timestamp,
+      true,
+    );
+
+    broadcastNewMessage(jid, {
+      id: dividerMessageId,
+      chat_jid: jid,
+      sender: '__system__',
+      sender_name: 'system',
+      content: 'context_reset',
+      timestamp,
+      is_from_me: true,
+    });
+  } catch (err) {
+    logger.warn(
+      { jid, err },
+      'Session reset succeeded but failed to append divider message',
+    );
+  }
+
+  logger.info(
+    { jid, folder: group.folder, siblingJids },
+    'Session reset: cleared session files and stopped all containers for folder',
+  );
+
+  return c.json({ success: true, dividerMessageId });
+});
+
+// POST /api/groups/:jid/clear-history - 清除聊天历史
+groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
+  const deps = getWebDeps();
+  if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+
+  const jid = c.req.param('jid');
+  const group = getRegisteredGroup(jid);
+  if (!group) return c.json({ error: 'Group not found' }, 404);
+  const authUser = c.get('user') as AuthUser;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
+  }
+
+  // Collect all JIDs sharing the same folder (e.g., web:main + feishu groups)
+  const siblingJids = getJidsByFolder(group.folder);
+
+  // 1. Stop ALL active processes for this folder first to avoid writes during cleanup.
+  try {
+    await Promise.all(siblingJids.map((j) => deps.queue.stopGroup(j)));
+  } catch (err) {
+    logger.error(
+      { jid, siblingJids, err },
+      'Failed to stop containers before clearing history',
+    );
+    return c.json(
+      { error: 'Failed to stop container, history not cleared' },
+      500,
+    );
+  }
+
+  // 2. Reset workspace: clear working directory, session files, and IPC artifacts.
+  try {
+    resetWorkspaceForGroup(group.folder);
+  } catch (err) {
+    logger.error(
+      { jid, folder: group.folder, err },
+      'Failed to reset workspace while clearing history',
+    );
+    return c.json(
+      { error: 'Failed to reset workspace, history not cleared' },
+      500,
+    );
+  }
+
+  // 3. Clear session state and message history for ALL sibling JIDs.
+  try {
+    deleteSession(group.folder);
+    delete deps.getSessions()[group.folder];
+    for (const siblingJid of siblingJids) {
+      deleteChatHistory(siblingJid);
+      deps.setLastAgentTimestamp(siblingJid, { timestamp: '', id: '' });
+    }
+  } catch (err) {
+    logger.error(
+      { jid, folder: group.folder, err },
+      'Failed to clear history state',
+    );
+    return c.json({ error: 'Failed to clear history' }, 500);
+  }
+
+  logger.info(
+    { jid, folder: group.folder, siblingJids },
+    'Cleared workspace, context and chat history for group and all siblings',
+  );
+  return c.json({ success: true });
+});
+
+// GET /api/groups/:jid/messages - 获取消息历史
+groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
+  const jid = c.req.param('jid');
+  const group = getRegisteredGroup(jid);
+  if (group) {
+    const authUser = c.get('user') as AuthUser;
+    if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions for host execution mode' },
+        403,
+      );
+    }
+  }
+
+  const before = c.req.query('before');
+  const after = c.req.query('after');
+  const limit = parseInt(c.req.query('limit') || '50', 10);
+
+  // 主容器合并查询：将 web:main 和所有 feishu:xxx（folder=main）的消息合并展示
+  const queryJids = [jid];
+  if (group?.folder === 'main') {
+    const allGroups = getAllRegisteredGroups();
+    for (const [otherJid, otherGroup] of Object.entries(allGroups)) {
+      if (otherJid !== jid && otherGroup.folder === 'main') {
+        queryJids.push(otherJid);
+      }
+    }
+  }
+
+  if (queryJids.length === 1) {
+    // 单 JID 走原路径
+    if (after) {
+      const messages = getMessagesAfter(jid, after, limit);
+      return c.json({ messages });
+    }
+    const rows = getMessagesPage(jid, before, limit + 1);
+    const hasMore = rows.length > limit;
+    const messages = hasMore ? rows.slice(0, limit) : rows;
+    return c.json({ messages, hasMore });
+  }
+
+  // 多 JID 合并查询
+  if (after) {
+    const messages = getMessagesAfterMulti(queryJids, after, limit);
+    return c.json({ messages });
+  }
+  const rows = getMessagesPageMulti(queryJids, before, limit + 1);
+  const hasMore = rows.length > limit;
+  const messages = hasMore ? rows.slice(0, limit) : rows;
+  return c.json({ messages, hasMore });
+});
+
+// GET /api/groups/:jid/env - 获取容器环境变量配置
+groupRoutes.get('/:jid/env', authMiddleware, (c) => {
+  const jid = c.req.param('jid');
+  const group = getRegisteredGroup(jid);
+  if (!group) return c.json({ error: 'Group not found' }, 404);
+
+  const user = c.get('user') as AuthUser;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(user)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
+  }
+
+  // Check permissions
+  if (
+    user.role !== 'admin' &&
+    (!user.permissions ||
+      !user.permissions.includes('manage_group_env'))
+  ) {
+    return c.json({ error: 'Insufficient permissions' }, 403);
+  }
+
+  const config = getContainerEnvConfig(group.folder);
+  return c.json(toPublicContainerEnvForUser(config, user));
+});
+
+// PUT /api/groups/:jid/env - 更新容器环境变量配置
+groupRoutes.put('/:jid/env', authMiddleware, async (c) => {
+  const jid = c.req.param('jid');
+  const group = getRegisteredGroup(jid);
+  if (!group) return c.json({ error: 'Group not found' }, 404);
+
+  const envUser = c.get('user') as AuthUser;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(envUser)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
+  }
+
+  // Check permissions
+  if (
+    envUser.role !== 'admin' &&
+    (!envUser.permissions ||
+      !envUser.permissions.includes('manage_group_env'))
+  ) {
+    return c.json({ error: 'Insufficient permissions' }, 403);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const validation = ContainerEnvSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+
+  const data = validation.data;
+
+  // Validate customEnv keys/values to prevent env injection
+  if (data.customEnv) {
+    const envKeyRe = /^[A-Za-z_][A-Za-z0-9_]*$/;
+    for (const [key, value] of Object.entries(data.customEnv)) {
+      if (!envKeyRe.test(key)) {
+        return c.json(
+          {
+            error: `Invalid env key: "${key}". Keys must match [A-Za-z_][A-Za-z0-9_]*`,
+          },
+          400,
+        );
+      }
+      if (/[\r\n\0]/.test(value)) {
+        return c.json(
+          {
+            error: `Env value for "${key}" contains invalid control characters`,
+          },
+          400,
+        );
+      }
+    }
+  }
+
+  const current = getContainerEnvConfig(group.folder);
+
+  // Build updated config: only update fields that are explicitly provided
+  const updated = { ...current };
+
+  if (data.anthropicBaseUrl !== undefined)
+    updated.anthropicBaseUrl = data.anthropicBaseUrl;
+  if (data.anthropicAuthToken !== undefined)
+    updated.anthropicAuthToken = data.anthropicAuthToken;
+  if (data.anthropicApiKey !== undefined)
+    updated.anthropicApiKey = data.anthropicApiKey;
+  if (data.claudeCodeOauthToken !== undefined)
+    updated.claudeCodeOauthToken = data.claudeCodeOauthToken;
+  if (data.customEnv !== undefined) updated.customEnv = data.customEnv;
+
+  try {
+    saveContainerEnvConfig(group.folder, updated);
+
+    // Restart container so it picks up the new env immediately
+    const deps = getWebDeps();
+    if (deps) {
+      await deps.queue.restartGroup(jid);
+      logger.info(
+        { jid, folder: group.folder },
+        'Restarted container after env config update',
+      );
+    }
+
+    return c.json(toPublicContainerEnvConfig(updated));
+  } catch (err) {
+    logger.error({ err }, 'Failed to save container env config');
+    return c.json({ error: 'Failed to save config' }, 500);
+  }
+});
+
+export default groupRoutes;

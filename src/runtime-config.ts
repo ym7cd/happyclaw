@@ -1,0 +1,1059 @@
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+
+import { DATA_DIR } from './config.js';
+import { logger } from './logger.js';
+
+const MAX_FIELD_LENGTH = 2000;
+const CURRENT_CONFIG_VERSION = 2;
+
+const CLAUDE_CONFIG_DIR = path.join(DATA_DIR, 'config');
+const CLAUDE_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'claude-provider.json');
+const CLAUDE_CONFIG_KEY_FILE = path.join(
+  CLAUDE_CONFIG_DIR,
+  'claude-provider.key',
+);
+const CLAUDE_CONFIG_AUDIT_FILE = path.join(
+  CLAUDE_CONFIG_DIR,
+  'claude-provider.audit.log',
+);
+const CLAUDE_CUSTOM_ENV_FILE = path.join(
+  CLAUDE_CONFIG_DIR,
+  'claude-custom-env.json',
+);
+const FEISHU_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'feishu-provider.json');
+const TELEGRAM_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'telegram-provider.json');
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_CLAUDE_ENV_KEYS = new Set([
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_AUTH_TOKEN',
+]);
+const DANGEROUS_ENV_VARS = new Set([
+  // Code execution / preload attacks
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'LD_AUDIT',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'DYLD_FRAMEWORK_PATH',
+  'NODE_OPTIONS',
+  'JAVA_TOOL_OPTIONS',
+  'PERL5OPT',
+  // Path manipulation
+  'PATH',
+  'PYTHONPATH',
+  'RUBYLIB',
+  'PERL5LIB',
+  'GIT_EXEC_PATH',
+  'CDPATH',
+  // Shell behavior
+  'BASH_ENV',
+  'ENV',
+  'PROMPT_COMMAND',
+  'ZDOTDIR',
+  // Editor / terminal (可被利用执行命令)
+  'EDITOR',
+  'VISUAL',
+  'PAGER',
+  // SSH / Git（防止凭据泄露或命令注入）
+  'SSH_AUTH_SOCK',
+  'SSH_AGENT_PID',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_ASKPASS',
+  // Sensitive directories
+  'HOME',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  // HappyClaw 内部路径映射
+  'HAPPYCLAW_WORKSPACE_GROUP',
+  'HAPPYCLAW_WORKSPACE_GLOBAL',
+  'HAPPYCLAW_WORKSPACE_IPC',
+  'CLAUDE_CONFIG_DIR',
+]);
+const MAX_CUSTOM_ENV_ENTRIES = 50;
+
+export interface ClaudeProviderConfig {
+  anthropicBaseUrl: string;
+  anthropicAuthToken: string;
+  anthropicApiKey: string;
+  claudeCodeOauthToken: string;
+  updatedAt: string | null;
+}
+
+export interface ClaudeProviderPublicConfig {
+  anthropicBaseUrl: string;
+  updatedAt: string | null;
+  hasAnthropicAuthToken: boolean;
+  hasAnthropicApiKey: boolean;
+  hasClaudeCodeOauthToken: boolean;
+  anthropicAuthTokenMasked: string | null;
+  anthropicApiKeyMasked: string | null;
+  claudeCodeOauthTokenMasked: string | null;
+}
+
+export interface FeishuProviderConfig {
+  appId: string;
+  appSecret: string;
+  enabled?: boolean;
+  updatedAt: string | null;
+}
+
+export type FeishuConfigSource = 'runtime' | 'env' | 'none';
+
+export interface FeishuProviderPublicConfig {
+  appId: string;
+  hasAppSecret: boolean;
+  appSecretMasked: string | null;
+  enabled: boolean;
+  updatedAt: string | null;
+  source: FeishuConfigSource;
+}
+
+export interface TelegramProviderConfig {
+  botToken: string;
+  enabled?: boolean;
+  updatedAt: string | null;
+}
+
+export type TelegramConfigSource = 'runtime' | 'env' | 'none';
+
+export interface TelegramProviderPublicConfig {
+  hasBotToken: boolean;
+  botTokenMasked: string | null;
+  enabled: boolean;
+  updatedAt: string | null;
+  source: TelegramConfigSource;
+}
+
+interface SecretPayload {
+  anthropicAuthToken: string;
+  anthropicApiKey: string;
+  claudeCodeOauthToken: string;
+}
+
+interface EncryptedSecrets {
+  iv: string;
+  tag: string;
+  data: string;
+}
+
+interface FeishuSecretPayload {
+  appSecret: string;
+}
+
+interface TelegramSecretPayload {
+  botToken: string;
+}
+
+interface StoredFeishuProviderConfigV1 {
+  version: 1;
+  appId: string;
+  enabled?: boolean;
+  updatedAt: string;
+  secret: EncryptedSecrets;
+}
+
+interface StoredTelegramProviderConfigV1 {
+  version: 1;
+  enabled?: boolean;
+  updatedAt: string;
+  secret: EncryptedSecrets;
+}
+
+interface StoredClaudeProviderConfigV2 {
+  version: 2;
+  anthropicBaseUrl: string;
+  updatedAt: string;
+  secrets: EncryptedSecrets;
+}
+
+interface StoredClaudeProviderConfigLegacy {
+  anthropicBaseUrl?: string;
+  anthropicAuthToken?: string;
+  anthropicApiKey?: string;
+  claudeCodeOauthToken?: string;
+  updatedAt?: string;
+}
+
+interface ClaudeConfigAuditEntry {
+  timestamp: string;
+  actor: string;
+  action: string;
+  changedFields: string[];
+  metadata?: Record<string, unknown>;
+}
+
+function normalizeSecret(input: unknown, fieldName: string): string {
+  if (typeof input !== 'string') {
+    throw new Error(`Invalid field: ${fieldName}`);
+  }
+  // Strip control characters that could inject extra env lines
+  const value = input.replace(/[\r\n\0]/g, '').trim();
+  if (value.length > MAX_FIELD_LENGTH) {
+    throw new Error(`Field too long: ${fieldName}`);
+  }
+  return value;
+}
+
+function normalizeBaseUrl(input: unknown): string {
+  if (typeof input !== 'string') {
+    throw new Error('Invalid field: anthropicBaseUrl');
+  }
+  const value = input.trim();
+  if (!value) return '';
+  if (value.length > MAX_FIELD_LENGTH) {
+    throw new Error('Field too long: anthropicBaseUrl');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('Invalid field: anthropicBaseUrl');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Invalid field: anthropicBaseUrl');
+  }
+  return value;
+}
+
+function normalizeFeishuAppId(input: unknown): string {
+  if (typeof input !== 'string') {
+    throw new Error('Invalid field: appId');
+  }
+  const value = input.trim();
+  if (!value) return '';
+  if (value.length > MAX_FIELD_LENGTH) {
+    throw new Error('Field too long: appId');
+  }
+  return value;
+}
+
+function sanitizeCustomEnvMap(
+  input: Record<string, string>,
+  options?: { skipReservedClaudeKeys?: boolean },
+): Record<string, string> {
+  const entries = Object.entries(input);
+  if (entries.length > MAX_CUSTOM_ENV_ENTRIES) {
+    throw new Error(
+      `customEnv must have at most ${MAX_CUSTOM_ENV_ENTRIES} entries`,
+    );
+  }
+
+  const out: Record<string, string> = {};
+  for (const [key, rawValue] of entries) {
+    if (!ENV_KEY_RE.test(key)) {
+      throw new Error(`Invalid env key: ${key}`);
+    }
+    if (options?.skipReservedClaudeKeys && RESERVED_CLAUDE_ENV_KEYS.has(key)) {
+      continue;
+    }
+    out[key] = sanitizeEnvValue(
+      typeof rawValue === 'string' ? rawValue : String(rawValue),
+    );
+  }
+  return out;
+}
+
+function normalizeConfig(
+  input: Omit<ClaudeProviderConfig, 'updatedAt'>,
+): Omit<ClaudeProviderConfig, 'updatedAt'> {
+  return {
+    anthropicBaseUrl: normalizeBaseUrl(input.anthropicBaseUrl),
+    anthropicAuthToken: normalizeSecret(
+      input.anthropicAuthToken,
+      'anthropicAuthToken',
+    ),
+    anthropicApiKey: normalizeSecret(input.anthropicApiKey, 'anthropicApiKey'),
+    claudeCodeOauthToken: normalizeSecret(
+      input.claudeCodeOauthToken,
+      'claudeCodeOauthToken',
+    ),
+  };
+}
+
+function buildConfig(
+  input: Omit<ClaudeProviderConfig, 'updatedAt'>,
+  updatedAt: string | null,
+): ClaudeProviderConfig {
+  return {
+    ...normalizeConfig(input),
+    updatedAt,
+  };
+}
+
+function getOrCreateEncryptionKey(): Buffer {
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+
+  if (fs.existsSync(CLAUDE_CONFIG_KEY_FILE)) {
+    const raw = fs.readFileSync(CLAUDE_CONFIG_KEY_FILE, 'utf-8').trim();
+    const key = Buffer.from(raw, 'hex');
+    if (key.length === 32) return key;
+    throw new Error('Invalid encryption key file');
+  }
+
+  const key = crypto.randomBytes(32);
+  fs.writeFileSync(CLAUDE_CONFIG_KEY_FILE, key.toString('hex') + '\n', {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  return key;
+}
+
+function encryptSecrets(payload: SecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptSecrets(secrets: EncryptedSecrets): SecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+
+  const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+  return {
+    anthropicAuthToken: normalizeSecret(
+      parsed.anthropicAuthToken ?? '',
+      'anthropicAuthToken',
+    ),
+    anthropicApiKey: normalizeSecret(
+      parsed.anthropicApiKey ?? '',
+      'anthropicApiKey',
+    ),
+    claudeCodeOauthToken: normalizeSecret(
+      parsed.claudeCodeOauthToken ?? '',
+      'claudeCodeOauthToken',
+    ),
+  };
+}
+
+function encryptFeishuSecret(payload: FeishuSecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptFeishuSecret(secrets: EncryptedSecrets): FeishuSecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+  const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+  return {
+    appSecret: normalizeSecret(parsed.appSecret ?? '', 'appSecret'),
+  };
+}
+
+function readLegacyConfig(
+  raw: StoredClaudeProviderConfigLegacy,
+): ClaudeProviderConfig {
+  return buildConfig(
+    {
+      anthropicBaseUrl: raw.anthropicBaseUrl ?? '',
+      anthropicAuthToken: raw.anthropicAuthToken ?? '',
+      anthropicApiKey: raw.anthropicApiKey ?? '',
+      claudeCodeOauthToken: raw.claudeCodeOauthToken ?? '',
+    },
+    typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
+  );
+}
+
+function readStoredConfig(): ClaudeProviderConfig | null {
+  if (!fs.existsSync(CLAUDE_CONFIG_FILE)) return null;
+  const content = fs.readFileSync(CLAUDE_CONFIG_FILE, 'utf-8');
+  const parsed = JSON.parse(content) as Record<string, unknown>;
+
+  if (parsed.version === CURRENT_CONFIG_VERSION) {
+    const v2 = parsed as unknown as StoredClaudeProviderConfigV2;
+    const secrets = decryptSecrets(v2.secrets);
+    return buildConfig(
+      {
+        anthropicBaseUrl: v2.anthropicBaseUrl,
+        anthropicAuthToken: secrets.anthropicAuthToken,
+        anthropicApiKey: secrets.anthropicApiKey,
+        claudeCodeOauthToken: secrets.claudeCodeOauthToken,
+      },
+      v2.updatedAt || null,
+    );
+  }
+
+  return readLegacyConfig(parsed as StoredClaudeProviderConfigLegacy);
+}
+
+function defaultsFromEnv(): ClaudeProviderConfig {
+  const raw = {
+    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL || '',
+    anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN || '',
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
+    claudeCodeOauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN || '',
+  };
+
+  try {
+    return buildConfig(raw, null);
+  } catch {
+    return {
+      anthropicBaseUrl: '',
+      anthropicAuthToken: raw.anthropicAuthToken.trim(),
+      anthropicApiKey: raw.anthropicApiKey.trim(),
+      claudeCodeOauthToken: raw.claudeCodeOauthToken.trim(),
+      updatedAt: null,
+    };
+  }
+}
+
+function readStoredFeishuConfig(): FeishuProviderConfig | null {
+  if (!fs.existsSync(FEISHU_CONFIG_FILE)) return null;
+  const content = fs.readFileSync(FEISHU_CONFIG_FILE, 'utf-8');
+  const parsed = JSON.parse(content) as Record<string, unknown>;
+  if (parsed.version !== 1) return null;
+
+  const stored = parsed as unknown as StoredFeishuProviderConfigV1;
+  const secret = decryptFeishuSecret(stored.secret);
+  return {
+    appId: normalizeFeishuAppId(stored.appId ?? ''),
+    appSecret: secret.appSecret,
+    enabled: stored.enabled,
+    updatedAt: stored.updatedAt || null,
+  };
+}
+
+function defaultsFeishuFromEnv(): FeishuProviderConfig {
+  const raw = {
+    appId: process.env.FEISHU_APP_ID || '',
+    appSecret: process.env.FEISHU_APP_SECRET || '',
+  };
+  return {
+    appId: raw.appId.trim(),
+    appSecret: raw.appSecret.trim(),
+    updatedAt: null,
+  };
+}
+
+export function getFeishuProviderConfigWithSource(): {
+  config: FeishuProviderConfig;
+  source: FeishuConfigSource;
+} {
+  try {
+    const stored = readStoredFeishuConfig();
+    if (stored) return { config: stored, source: 'runtime' };
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to read runtime Feishu config, falling back to env',
+    );
+  }
+
+  const fromEnv = defaultsFeishuFromEnv();
+  if (fromEnv.appId || fromEnv.appSecret) {
+    return { config: fromEnv, source: 'env' };
+  }
+
+  return { config: fromEnv, source: 'none' };
+}
+
+export function getFeishuProviderConfig(): FeishuProviderConfig {
+  return getFeishuProviderConfigWithSource().config;
+}
+
+export function saveFeishuProviderConfig(
+  next: Omit<FeishuProviderConfig, 'updatedAt'>,
+): FeishuProviderConfig {
+  const normalized: FeishuProviderConfig = {
+    appId: normalizeFeishuAppId(next.appId),
+    appSecret: normalizeSecret(next.appSecret, 'appSecret'),
+    enabled: next.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredFeishuProviderConfigV1 = {
+    version: 1,
+    appId: normalized.appId,
+    enabled: normalized.enabled,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptFeishuSecret({ appSecret: normalized.appSecret }),
+  };
+
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const tmp = `${FEISHU_CONFIG_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, FEISHU_CONFIG_FILE);
+  return normalized;
+}
+
+export function toPublicFeishuProviderConfig(
+  config: FeishuProviderConfig,
+  source: FeishuConfigSource,
+): FeishuProviderPublicConfig {
+  return {
+    appId: config.appId,
+    hasAppSecret: !!config.appSecret,
+    appSecretMasked: maskSecret(config.appSecret),
+    enabled: config.enabled !== false,
+    updatedAt: config.updatedAt,
+    source,
+  };
+}
+
+// ========== Telegram Provider Config ==========
+
+function encryptTelegramSecret(payload: TelegramSecretPayload): EncryptedSecrets {
+  const key = getOrCreateEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf-8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+function decryptTelegramSecret(secrets: EncryptedSecrets): TelegramSecretPayload {
+  const key = getOrCreateEncryptionKey();
+  const iv = Buffer.from(secrets.iv, 'base64');
+  const tag = Buffer.from(secrets.tag, 'base64');
+  const encrypted = Buffer.from(secrets.data, 'base64');
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(encrypted),
+    decipher.final(),
+  ]).toString('utf-8');
+  const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+  return {
+    botToken: normalizeSecret(parsed.botToken ?? '', 'botToken'),
+  };
+}
+
+function readStoredTelegramConfig(): TelegramProviderConfig | null {
+  if (!fs.existsSync(TELEGRAM_CONFIG_FILE)) return null;
+  const content = fs.readFileSync(TELEGRAM_CONFIG_FILE, 'utf-8');
+  const parsed = JSON.parse(content) as Record<string, unknown>;
+  if (parsed.version !== 1) return null;
+
+  const stored = parsed as unknown as StoredTelegramProviderConfigV1;
+  const secret = decryptTelegramSecret(stored.secret);
+  return {
+    botToken: secret.botToken,
+    enabled: stored.enabled,
+    updatedAt: stored.updatedAt || null,
+  };
+}
+
+function defaultsTelegramFromEnv(): TelegramProviderConfig {
+  const raw = {
+    botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+  };
+  return {
+    botToken: raw.botToken.trim(),
+    updatedAt: null,
+  };
+}
+
+export function getTelegramProviderConfigWithSource(): {
+  config: TelegramProviderConfig;
+  source: TelegramConfigSource;
+} {
+  try {
+    const stored = readStoredTelegramConfig();
+    if (stored) return { config: stored, source: 'runtime' };
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to read runtime Telegram config, falling back to env',
+    );
+  }
+
+  const fromEnv = defaultsTelegramFromEnv();
+  if (fromEnv.botToken) {
+    return { config: fromEnv, source: 'env' };
+  }
+
+  return { config: fromEnv, source: 'none' };
+}
+
+export function getTelegramProviderConfig(): TelegramProviderConfig {
+  return getTelegramProviderConfigWithSource().config;
+}
+
+export function saveTelegramProviderConfig(
+  next: Omit<TelegramProviderConfig, 'updatedAt'>,
+): TelegramProviderConfig {
+  const normalized: TelegramProviderConfig = {
+    botToken: normalizeSecret(next.botToken, 'botToken'),
+    enabled: next.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredTelegramProviderConfigV1 = {
+    version: 1,
+    enabled: normalized.enabled,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptTelegramSecret({ botToken: normalized.botToken }),
+  };
+
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const tmp = `${TELEGRAM_CONFIG_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, TELEGRAM_CONFIG_FILE);
+  return normalized;
+}
+
+export function toPublicTelegramProviderConfig(
+  config: TelegramProviderConfig,
+  source: TelegramConfigSource,
+): TelegramProviderPublicConfig {
+  return {
+    hasBotToken: !!config.botToken,
+    botTokenMasked: maskSecret(config.botToken),
+    enabled: config.enabled !== false,
+    updatedAt: config.updatedAt,
+    source,
+  };
+}
+
+export function getGlobalClaudeCustomEnv(): Record<string, string> {
+  try {
+    if (!fs.existsSync(CLAUDE_CUSTOM_ENV_FILE)) return {};
+    const parsed = JSON.parse(
+      fs.readFileSync(CLAUDE_CUSTOM_ENV_FILE, 'utf-8'),
+    ) as {
+      customEnv?: Record<string, string>;
+    };
+    return sanitizeCustomEnvMap(parsed.customEnv || {}, {
+      skipReservedClaudeKeys: true,
+    });
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to read global Claude custom env, returning empty',
+    );
+    return {};
+  }
+}
+
+export function saveGlobalClaudeCustomEnv(
+  customEnv: Record<string, string>,
+): Record<string, string> {
+  const sanitized = sanitizeCustomEnvMap(customEnv, {
+    skipReservedClaudeKeys: true,
+  });
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const tmp = `${CLAUDE_CUSTOM_ENV_FILE}.tmp`;
+  fs.writeFileSync(
+    tmp,
+    JSON.stringify({ customEnv: sanitized }, null, 2) + '\n',
+    'utf-8',
+  );
+  fs.renameSync(tmp, CLAUDE_CUSTOM_ENV_FILE);
+  return sanitized;
+}
+
+function maskSecret(value: string): string | null {
+  if (!value) return null;
+  if (value.length <= 8)
+    return `${'*'.repeat(Math.max(value.length - 2, 1))}${value.slice(-2)}`;
+  return `${value.slice(0, 3)}${'*'.repeat(Math.max(value.length - 7, 4))}${value.slice(-4)}`;
+}
+
+export function toPublicClaudeProviderConfig(
+  config: ClaudeProviderConfig,
+): ClaudeProviderPublicConfig {
+  return {
+    anthropicBaseUrl: config.anthropicBaseUrl,
+    updatedAt: config.updatedAt,
+    hasAnthropicAuthToken: !!config.anthropicAuthToken,
+    hasAnthropicApiKey: !!config.anthropicApiKey,
+    hasClaudeCodeOauthToken: !!config.claudeCodeOauthToken,
+    anthropicAuthTokenMasked: maskSecret(config.anthropicAuthToken),
+    anthropicApiKeyMasked: maskSecret(config.anthropicApiKey),
+    claudeCodeOauthTokenMasked: maskSecret(config.claudeCodeOauthToken),
+  };
+}
+
+export function validateClaudeProviderConfig(
+  config: ClaudeProviderConfig,
+): string[] {
+  const errors: string[] = [];
+
+  if (config.anthropicAuthToken && !config.anthropicBaseUrl) {
+    errors.push('使用 ANTHROPIC_AUTH_TOKEN 时必须配置 ANTHROPIC_BASE_URL');
+  }
+
+  if (config.anthropicBaseUrl) {
+    try {
+      const parsed = new URL(config.anthropicBaseUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        errors.push('ANTHROPIC_BASE_URL 必须是 http 或 https 地址');
+      }
+    } catch {
+      errors.push('ANTHROPIC_BASE_URL 格式不正确');
+    }
+  }
+
+  return errors;
+}
+
+export function getClaudeProviderConfig(): ClaudeProviderConfig {
+  try {
+    const stored = readStoredConfig();
+    if (stored) return stored;
+  } catch {
+    // ignore corrupted file and use env fallback
+  }
+  return defaultsFromEnv();
+}
+
+export function saveClaudeProviderConfig(
+  next: Omit<ClaudeProviderConfig, 'updatedAt'>,
+): ClaudeProviderConfig {
+  const normalized = buildConfig(next, new Date().toISOString());
+  const errors = validateClaudeProviderConfig(normalized);
+  if (errors.length > 0) {
+    throw new Error(errors.join('；'));
+  }
+
+  const payload: StoredClaudeProviderConfigV2 = {
+    version: CURRENT_CONFIG_VERSION,
+    anthropicBaseUrl: normalized.anthropicBaseUrl,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secrets: encryptSecrets({
+      anthropicAuthToken: normalized.anthropicAuthToken,
+      anthropicApiKey: normalized.anthropicApiKey,
+      claudeCodeOauthToken: normalized.claudeCodeOauthToken,
+    }),
+  };
+
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const tmp = `${CLAUDE_CONFIG_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, CLAUDE_CONFIG_FILE);
+
+  return normalized;
+}
+
+/** Strip control characters from a value before writing to env file (defense-in-depth) */
+function sanitizeEnvValue(value: string): string {
+  return value.replace(/[\r\n\0]/g, '');
+}
+
+export function buildClaudeEnvLines(config: ClaudeProviderConfig): string[] {
+  const lines: string[] = [];
+
+  if (config.claudeCodeOauthToken) {
+    lines.push(
+      `CLAUDE_CODE_OAUTH_TOKEN=${sanitizeEnvValue(config.claudeCodeOauthToken)}`,
+    );
+  }
+  if (config.anthropicApiKey) {
+    lines.push(`ANTHROPIC_API_KEY=${sanitizeEnvValue(config.anthropicApiKey)}`);
+  }
+  if (config.anthropicBaseUrl) {
+    lines.push(
+      `ANTHROPIC_BASE_URL=${sanitizeEnvValue(config.anthropicBaseUrl)}`,
+    );
+  }
+  if (config.anthropicAuthToken) {
+    lines.push(
+      `ANTHROPIC_AUTH_TOKEN=${sanitizeEnvValue(config.anthropicAuthToken)}`,
+    );
+  }
+
+  const customEnv = getGlobalClaudeCustomEnv();
+  for (const [key, value] of Object.entries(customEnv)) {
+    if (RESERVED_CLAUDE_ENV_KEYS.has(key)) continue;
+    lines.push(`${key}=${sanitizeEnvValue(value)}`);
+  }
+
+  return lines;
+}
+
+export function appendClaudeConfigAudit(
+  actor: string,
+  action: string,
+  changedFields: string[],
+  metadata?: Record<string, unknown>,
+): void {
+  const entry: ClaudeConfigAuditEntry = {
+    timestamp: new Date().toISOString(),
+    actor,
+    action,
+    changedFields,
+    metadata,
+  };
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  fs.appendFileSync(
+    CLAUDE_CONFIG_AUDIT_FILE,
+    `${JSON.stringify(entry)}\n`,
+    'utf-8',
+  );
+}
+
+// ─── Per-container environment config ───────────────────────────
+
+const CONTAINER_ENV_DIR = path.join(DATA_DIR, 'config', 'container-env');
+
+export interface ContainerEnvConfig {
+  /** Claude provider overrides — empty string means "use global" */
+  anthropicBaseUrl?: string;
+  anthropicAuthToken?: string;
+  anthropicApiKey?: string;
+  claudeCodeOauthToken?: string;
+  /** Arbitrary extra env vars injected into the container */
+  customEnv?: Record<string, string>;
+}
+
+export interface ContainerEnvPublicConfig {
+  anthropicBaseUrl: string;
+  anthropicAuthTokenMasked: string | null;
+  anthropicApiKeyMasked: string | null;
+  claudeCodeOauthTokenMasked: string | null;
+  hasAnthropicAuthToken: boolean;
+  hasAnthropicApiKey: boolean;
+  hasClaudeCodeOauthToken: boolean;
+  customEnv: Record<string, string>;
+}
+
+function containerEnvPath(folder: string): string {
+  return path.join(CONTAINER_ENV_DIR, `${folder}.json`);
+}
+
+export function getContainerEnvConfig(folder: string): ContainerEnvConfig {
+  const filePath = containerEnvPath(folder);
+  try {
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(
+        fs.readFileSync(filePath, 'utf-8'),
+      ) as ContainerEnvConfig;
+    }
+  } catch (err) {
+    logger.warn(
+      { err, folder },
+      'Failed to read container env config, returning defaults',
+    );
+  }
+  return {};
+}
+
+export function saveContainerEnvConfig(
+  folder: string,
+  config: ContainerEnvConfig,
+): void {
+  // Sanitize all string fields to prevent env injection
+  const sanitized: ContainerEnvConfig = { ...config };
+  if (sanitized.anthropicBaseUrl)
+    sanitized.anthropicBaseUrl = sanitizeEnvValue(sanitized.anthropicBaseUrl);
+  if (sanitized.anthropicAuthToken)
+    sanitized.anthropicAuthToken = sanitizeEnvValue(
+      sanitized.anthropicAuthToken,
+    );
+  if (sanitized.anthropicApiKey)
+    sanitized.anthropicApiKey = sanitizeEnvValue(sanitized.anthropicApiKey);
+  if (sanitized.claudeCodeOauthToken)
+    sanitized.claudeCodeOauthToken = sanitizeEnvValue(
+      sanitized.claudeCodeOauthToken,
+    );
+  if (sanitized.customEnv) {
+    const cleanEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(sanitized.customEnv)) {
+      cleanEnv[k] = sanitizeEnvValue(v);
+    }
+    sanitized.customEnv = cleanEnv;
+  }
+
+  fs.mkdirSync(CONTAINER_ENV_DIR, { recursive: true });
+  const tmp = `${containerEnvPath(folder)}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(sanitized, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, containerEnvPath(folder));
+}
+
+export function deleteContainerEnvConfig(folder: string): void {
+  const filePath = containerEnvPath(folder);
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch {
+    // ignore
+  }
+}
+
+export function toPublicContainerEnvConfig(
+  config: ContainerEnvConfig,
+): ContainerEnvPublicConfig {
+  return {
+    anthropicBaseUrl: config.anthropicBaseUrl || '',
+    hasAnthropicAuthToken: !!config.anthropicAuthToken,
+    hasAnthropicApiKey: !!config.anthropicApiKey,
+    hasClaudeCodeOauthToken: !!config.claudeCodeOauthToken,
+    anthropicAuthTokenMasked: maskSecret(config.anthropicAuthToken || ''),
+    anthropicApiKeyMasked: maskSecret(config.anthropicApiKey || ''),
+    claudeCodeOauthTokenMasked: maskSecret(config.claudeCodeOauthToken || ''),
+    customEnv: config.customEnv || {},
+  };
+}
+
+/**
+ * Merge global config with per-container overrides.
+ * Non-empty per-container fields override the global value.
+ */
+export function mergeClaudeEnvConfig(
+  global: ClaudeProviderConfig,
+  override: ContainerEnvConfig,
+): ClaudeProviderConfig {
+  return {
+    anthropicBaseUrl: override.anthropicBaseUrl || global.anthropicBaseUrl,
+    anthropicAuthToken:
+      override.anthropicAuthToken || global.anthropicAuthToken,
+    anthropicApiKey: override.anthropicApiKey || global.anthropicApiKey,
+    claudeCodeOauthToken:
+      override.claudeCodeOauthToken || global.claudeCodeOauthToken,
+    updatedAt: global.updatedAt,
+  };
+}
+
+// ─── Registration config (plain JSON, no encryption) ─────────────
+
+const REGISTRATION_CONFIG_FILE = path.join(
+  CLAUDE_CONFIG_DIR,
+  'registration.json',
+);
+
+export interface RegistrationConfig {
+  allowRegistration: boolean;
+  requireInviteCode: boolean;
+  updatedAt: string | null;
+}
+
+const DEFAULT_REGISTRATION_CONFIG: RegistrationConfig = {
+  allowRegistration: true,
+  requireInviteCode: true,
+  updatedAt: null,
+};
+
+export function getRegistrationConfig(): RegistrationConfig {
+  try {
+    if (!fs.existsSync(REGISTRATION_CONFIG_FILE)) {
+      return { ...DEFAULT_REGISTRATION_CONFIG };
+    }
+    const raw = JSON.parse(
+      fs.readFileSync(REGISTRATION_CONFIG_FILE, 'utf-8'),
+    ) as Record<string, unknown>;
+    return {
+      allowRegistration:
+        typeof raw.allowRegistration === 'boolean'
+          ? raw.allowRegistration
+          : true,
+      requireInviteCode:
+        typeof raw.requireInviteCode === 'boolean'
+          ? raw.requireInviteCode
+          : true,
+      updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : null,
+    };
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to read registration config, returning defaults',
+    );
+    return { ...DEFAULT_REGISTRATION_CONFIG };
+  }
+}
+
+export function saveRegistrationConfig(
+  next: Pick<RegistrationConfig, 'allowRegistration' | 'requireInviteCode'>,
+): RegistrationConfig {
+  const config: RegistrationConfig = {
+    allowRegistration: next.allowRegistration,
+    requireInviteCode: next.requireInviteCode,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const tmp = `${REGISTRATION_CONFIG_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, REGISTRATION_CONFIG_FILE);
+  return config;
+}
+
+/**
+ * Build full env lines: merged Claude config + custom env vars.
+ */
+export function buildContainerEnvLines(
+  global: ClaudeProviderConfig,
+  override: ContainerEnvConfig,
+): string[] {
+  const merged = mergeClaudeEnvConfig(global, override);
+  const lines = buildClaudeEnvLines(merged);
+
+  // Append custom env vars (with safety sanitization as defense-in-depth)
+  if (override.customEnv) {
+    for (const [key, value] of Object.entries(override.customEnv)) {
+      if (!key || value === undefined) continue;
+      if (!ENV_KEY_RE.test(key)) {
+        logger.warn(
+          { key },
+          'Skipping invalid env key in buildContainerEnvLines',
+        );
+        continue;
+      }
+      // Block dangerous environment variables
+      if (DANGEROUS_ENV_VARS.has(key)) {
+        logger.warn(
+          { key },
+          'Blocked dangerous env variable in buildContainerEnvLines',
+        );
+        continue;
+      }
+      // Strip control characters to prevent env injection
+      const sanitized = value.replace(/[\r\n\0]/g, '');
+      lines.push(`${key}=${sanitized}`);
+    }
+  }
+
+  return lines;
+}

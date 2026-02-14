@@ -1,0 +1,444 @@
+// Configuration management routes
+
+import { Hono } from 'hono';
+import type { Variables } from '../web-context.js';
+import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
+import {
+  ClaudeConfigSchema,
+  ClaudeSecretsSchema,
+  ClaudeCustomEnvSchema,
+  FeishuConfigSchema,
+  TelegramConfigSchema,
+  RegistrationConfigSchema,
+} from '../schemas.js';
+import {
+  getClaudeProviderConfig,
+  toPublicClaudeProviderConfig,
+  saveClaudeProviderConfig,
+  appendClaudeConfigAudit,
+  getGlobalClaudeCustomEnv,
+  saveGlobalClaudeCustomEnv,
+  getFeishuProviderConfig,
+  getFeishuProviderConfigWithSource,
+  toPublicFeishuProviderConfig,
+  saveFeishuProviderConfig,
+  getTelegramProviderConfig,
+  getTelegramProviderConfigWithSource,
+  toPublicTelegramProviderConfig,
+  saveTelegramProviderConfig,
+  getRegistrationConfig,
+  saveRegistrationConfig,
+} from '../runtime-config.js';
+import type { AuthUser } from '../types.js';
+import { hasPermission } from '../permissions.js';
+import { logger } from '../logger.js';
+
+const configRoutes = new Hono<{ Variables: Variables }>();
+
+// Inject deps at runtime
+let deps: any = null;
+export function injectConfigDeps(d: any) {
+  deps = d;
+}
+
+// --- Routes ---
+
+configRoutes.get('/claude', authMiddleware, systemConfigMiddleware, (c) => {
+  try {
+    return c.json(toPublicClaudeProviderConfig(getClaudeProviderConfig()));
+  } catch (err) {
+    logger.error({ err }, 'Failed to load Claude config');
+    return c.json({ error: 'Failed to load Claude config' }, 500);
+  }
+});
+
+configRoutes.get(
+  '/claude/custom-env',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    try {
+      const user = c.get('user') as AuthUser;
+      const customEnv = getGlobalClaudeCustomEnv();
+      if (!hasPermission(user, 'manage_system_config')) {
+        return c.json({ customEnv: {} });
+      }
+      return c.json({ customEnv });
+    } catch (err) {
+      logger.error({ err }, 'Failed to load Claude custom env');
+      return c.json({ error: 'Failed to load Claude custom env' }, 500);
+    }
+  },
+);
+
+configRoutes.put(
+  '/claude',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = ClaudeConfigSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    const actor = (c.get('user') as AuthUser).username;
+    const current = getClaudeProviderConfig();
+
+    try {
+      const saved = saveClaudeProviderConfig({
+        anthropicBaseUrl: validation.data.anthropicBaseUrl,
+        anthropicAuthToken: current.anthropicAuthToken,
+        anthropicApiKey: current.anthropicApiKey,
+        claudeCodeOauthToken: current.claudeCodeOauthToken,
+      });
+      appendClaudeConfigAudit(actor, 'update_base_url', ['anthropicBaseUrl']);
+      return c.json(toPublicClaudeProviderConfig(saved));
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Invalid Claude config payload';
+      logger.warn({ err }, 'Invalid Claude config payload');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
+configRoutes.put(
+  '/claude/custom-env',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = ClaudeCustomEnvSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    try {
+      const saved = saveGlobalClaudeCustomEnv(validation.data.customEnv);
+      return c.json({ customEnv: saved });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Invalid custom env payload';
+      logger.warn({ err }, 'Invalid Claude custom env payload');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
+configRoutes.put(
+  '/claude/secrets',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+
+    const validation = ClaudeSecretsSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    const actor = (c.get('user') as AuthUser).username;
+    const current = getClaudeProviderConfig();
+
+    const next = { ...current };
+    const changedFields: string[] = [];
+
+    if (typeof validation.data.anthropicAuthToken === 'string') {
+      next.anthropicAuthToken = validation.data.anthropicAuthToken;
+      changedFields.push('anthropicAuthToken:set');
+    } else if (validation.data.clearAnthropicAuthToken === true) {
+      next.anthropicAuthToken = '';
+      changedFields.push('anthropicAuthToken:clear');
+    }
+
+    if (typeof validation.data.anthropicApiKey === 'string') {
+      next.anthropicApiKey = validation.data.anthropicApiKey;
+      changedFields.push('anthropicApiKey:set');
+    } else if (validation.data.clearAnthropicApiKey === true) {
+      next.anthropicApiKey = '';
+      changedFields.push('anthropicApiKey:clear');
+    }
+
+    if (typeof validation.data.claudeCodeOauthToken === 'string') {
+      next.claudeCodeOauthToken = validation.data.claudeCodeOauthToken;
+      changedFields.push('claudeCodeOauthToken:set');
+    } else if (validation.data.clearClaudeCodeOauthToken === true) {
+      next.claudeCodeOauthToken = '';
+      changedFields.push('claudeCodeOauthToken:clear');
+    }
+
+    if (changedFields.length === 0) {
+      return c.json({ error: 'No secret changes provided' }, 400);
+    }
+
+    try {
+      const saved = saveClaudeProviderConfig({
+        anthropicBaseUrl: next.anthropicBaseUrl,
+        anthropicAuthToken: next.anthropicAuthToken,
+        anthropicApiKey: next.anthropicApiKey,
+        claudeCodeOauthToken: next.claudeCodeOauthToken,
+      });
+      appendClaudeConfigAudit(actor, 'update_secrets', changedFields);
+      return c.json(toPublicClaudeProviderConfig(saved));
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Invalid Claude config payload';
+      logger.warn({ err }, 'Invalid Claude secret payload');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
+configRoutes.post(
+  '/claude/apply',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+
+    const actor = (c.get('user') as AuthUser).username;
+    const groupJids = Object.keys(deps.getRegisteredGroups());
+    const results = await Promise.allSettled(
+      groupJids.map((jid) => deps!.queue.stopGroup(jid)),
+    );
+    const failedCount = results.filter((r) => r.status === 'rejected').length;
+    appendClaudeConfigAudit(actor, 'apply_to_all_flows', ['queue.stopGroup'], {
+      stoppedCount: groupJids.length - failedCount,
+      failedCount,
+    });
+    if (failedCount > 0) {
+      return c.json(
+        {
+          success: false,
+          stoppedCount: groupJids.length - failedCount,
+          failedCount,
+          error: `${failedCount} container(s) failed to stop`,
+        },
+        207,
+      );
+    }
+    return c.json({ success: true, stoppedCount: groupJids.length });
+  },
+);
+
+configRoutes.get('/feishu', authMiddleware, systemConfigMiddleware, (c) => {
+  try {
+    const { config, source } = getFeishuProviderConfigWithSource();
+    const pub = toPublicFeishuProviderConfig(config, source);
+    const connected = deps?.isFeishuConnected?.() ?? false;
+    return c.json({ ...pub, connected });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load Feishu config');
+    return c.json({ error: 'Failed to load Feishu config' }, 500);
+  }
+});
+
+configRoutes.put(
+  '/feishu',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = FeishuConfigSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    const current = getFeishuProviderConfig();
+    const next = { ...current };
+    if (typeof validation.data.appId === 'string') {
+      next.appId = validation.data.appId;
+    }
+    if (typeof validation.data.appSecret === 'string') {
+      next.appSecret = validation.data.appSecret;
+    } else if (validation.data.clearAppSecret === true) {
+      next.appSecret = '';
+    }
+    if (typeof validation.data.enabled === 'boolean') {
+      next.enabled = validation.data.enabled;
+    }
+
+    try {
+      const saved = saveFeishuProviderConfig({
+        appId: next.appId,
+        appSecret: next.appSecret,
+        enabled: next.enabled,
+      });
+
+      // Hot-reload: reconnect/disconnect Feishu channel
+      let connected = false;
+      if (deps?.reloadFeishuConnection) {
+        try {
+          connected = await deps.reloadFeishuConnection(saved);
+        } catch (err: unknown) {
+          logger.warn({ err }, 'Failed to reload Feishu connection');
+        }
+      }
+
+      return c.json({ ...toPublicFeishuProviderConfig(saved, 'runtime'), connected });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Invalid Feishu config payload';
+      logger.warn({ err }, 'Invalid Feishu config payload');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
+// ─── Telegram config ─────────────────────────────────────────────
+
+configRoutes.get('/telegram', authMiddleware, systemConfigMiddleware, (c) => {
+  try {
+    const { config, source } = getTelegramProviderConfigWithSource();
+    const pub = toPublicTelegramProviderConfig(config, source);
+    const connected = deps?.isTelegramConnected?.() ?? false;
+    return c.json({ ...pub, connected });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load Telegram config');
+    return c.json({ error: 'Failed to load Telegram config' }, 500);
+  }
+});
+
+configRoutes.put(
+  '/telegram',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = TelegramConfigSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    const current = getTelegramProviderConfig();
+    const next = { ...current };
+    if (typeof validation.data.botToken === 'string') {
+      next.botToken = validation.data.botToken;
+    } else if (validation.data.clearBotToken === true) {
+      next.botToken = '';
+    }
+    if (typeof validation.data.enabled === 'boolean') {
+      next.enabled = validation.data.enabled;
+    }
+
+    try {
+      const saved = saveTelegramProviderConfig({
+        botToken: next.botToken,
+        enabled: next.enabled,
+      });
+
+      // Hot-reload: reconnect/disconnect Telegram channel
+      let connected = false;
+      if (deps?.reloadTelegramConnection) {
+        try {
+          connected = await deps.reloadTelegramConnection(saved);
+        } catch (err: unknown) {
+          logger.warn({ err }, 'Failed to reload Telegram connection');
+        }
+      }
+
+      return c.json({ ...toPublicTelegramProviderConfig(saved, 'runtime'), connected });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Invalid Telegram config payload';
+      logger.warn({ err }, 'Invalid Telegram config payload');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
+configRoutes.post(
+  '/telegram/test',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const config = getTelegramProviderConfig();
+    if (!config.botToken) {
+      return c.json({ error: 'Telegram bot token not configured' }, 400);
+    }
+
+    try {
+      const { Bot } = await import('grammy');
+      const testBot = new Bot(config.botToken);
+      const me = await testBot.api.getMe();
+      return c.json({
+        success: true,
+        bot_username: me.username,
+        bot_id: me.id,
+        bot_name: me.first_name,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to connect to Telegram';
+      logger.warn({ err }, 'Failed to test Telegram connection');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
+// ─── Registration config ─────────────────────────────────────────
+
+configRoutes.get(
+  '/registration',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    try {
+      return c.json(getRegistrationConfig());
+    } catch (err) {
+      logger.error({ err }, 'Failed to load registration config');
+      return c.json({ error: 'Failed to load registration config' }, 500);
+    }
+  },
+);
+
+configRoutes.put(
+  '/registration',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = RegistrationConfigSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    try {
+      const actor = (c.get('user') as AuthUser).username;
+      const saved = saveRegistrationConfig(validation.data);
+      appendClaudeConfigAudit(actor, 'update_registration_config', [
+        'allowRegistration',
+        'requireInviteCode',
+      ]);
+      return c.json(saved);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Invalid registration config payload';
+      logger.warn({ err }, 'Invalid registration config payload');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
+export default configRoutes;

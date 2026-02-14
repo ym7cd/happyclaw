@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Runtime data — databases, encrypted configs, sessions, IPC, env files
+store/
+data/
+logs/
+
+# Groups — agent workspace, memory (CLAUDE.md), conversations, user uploads, execution logs
+# All personal data, auto-created at startup, must not be committed.
+groups/
+
+# Environment variables (may contain API keys and secrets)
+.env
+.env.*
+
+# Secrets — catch-all for key/cert files that may appear anywhere
+*.key
+*.pem
+*.keys.json
+
+# Database files outside store/ (safety net)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# Local tooling metadata
+.claude/
+.mcp.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

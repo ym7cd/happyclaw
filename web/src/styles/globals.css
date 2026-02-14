@@ -1,0 +1,295 @@
+@import "tailwindcss";
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:is(.dark *));
+
+/* =====================================================
+   Tailwind CSS 4 Theme — shadcn/ui CSS variable mapping
+   Maps semantic CSS variables → Tailwind utility classes
+   e.g. --color-primary → bg-primary, text-primary, etc.
+   ===================================================== */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar-background);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Brand color scale — available as bg-brand-500, text-brand-300, etc. */
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+
+  /* Feedback semantic colors — bg-success, text-warning, etc. */
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-error: var(--error);
+  --color-error-bg: var(--error-bg);
+
+  /* Border radius tokens */
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* =====================================================
+   Design Token values — Teal theme
+   Primary: #0d9488 (Teal) | Logo accent: #d97706 (Amber) | Base: Slate
+   ===================================================== */
+:root {
+  /* shadcn/ui semantic tokens */
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --accent: #f0fdfa;
+  --accent-foreground: #134e4a;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #0d9488;
+  --radius: 0.5rem;
+
+  /* Brand color scale (Teal) */
+  --brand-50: #f0fdfa;
+  --brand-100: #ccfbf1;
+  --brand-200: #99f6e4;
+  --brand-300: #5eead4;
+  --brand-400: #2dd4bf;
+  --brand-500: #0d9488;
+  --brand-600: #0f766e;
+  --brand-700: #115e59;
+
+  /* Chart colors */
+  --chart-1: #0d9488;
+  --chart-2: #d97706;
+  --chart-3: #4c6ef5;
+  --chart-4: #9333ea;
+  --chart-5: #dc2626;
+
+  /* Sidebar */
+  --sidebar-background: #f8fafc;
+  --sidebar-foreground: #0f172a;
+  --sidebar-primary: #0d9488;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f1f5f9;
+  --sidebar-accent-foreground: #0f172a;
+  --sidebar-border: #e2e8f0;
+  --sidebar-ring: #0d9488;
+
+  /* Feedback colors */
+  --success: #16a34a;
+  --success-bg: #dcfce7;
+  --warning: #d97706;
+  --warning-bg: #fef3c7;
+  --error: #dc2626;
+  --error-bg: #fee2e2;
+
+  /* iOS keyboard height */
+  --keyboard-height: 0px;
+}
+
+/* =====================================================
+   Base styles
+   ===================================================== */
+
+/* Tailwind v4 默认 border 使用 currentColor（黑色），
+   覆盖为设计系统的 border 色 */
+*,
+::after,
+::before,
+::backdrop,
+::file-selector-button {
+  border-color: var(--border, #e2e8f0);
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Code highlighting theme override — GitHub light */
+pre code.hljs {
+  background: #f6f8fa !important;
+  border-radius: 8px;
+  padding: 16px !important;
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Safe area insets for iOS */
+@supports (padding: env(safe-area-inset-top)) {
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* =====================================================
+   iOS PWA: 防止底部 TabBar 触发 Safari 工具栏
+
+   问题根因：
+   1. URL 变化（History API）会触发工具栏
+   2. 底部边缘触摸会触发系统工具栏（iOS 保留区域）
+
+   核心策略：
+   - 底部边缘是 iOS 系统保留区域，Web 无法完全阻止
+   - 解决方案：将交互元素移离底部边缘 + 触摸吸收层
+   - TabBar 内容必须完全在安全区域内（距底部 > 44px）
+   ===================================================== */
+
+/* PWA standalone 模式专用优化 */
+@media all and (display-mode: standalone) {
+  /* 全局禁止双击缩放 */
+  body {
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+  }
+
+  /*
+   * 关键方案：底部触摸吸收层
+   * 这个透明层位于屏幕最底部，高度 44px（iOS 手势区域高度）
+   * 它会拦截所有底部边缘的触摸事件，防止触发系统工具栏
+   */
+  .pwa-bottom-guard {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 44px;
+    background: transparent;
+    touch-action: none;
+    z-index: 9999;
+    pointer-events: auto;
+    /* 确保这个层可以接收触摸事件 */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 聊天输入框底部安全区域 */
+  .ios-pwa-bottom-safe {
+    padding-bottom: max(env(safe-area-inset-bottom), 34px);
+  }
+}
+
+/* Floating Navigation (Capsule Style) */
+.floating-nav-container {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.floating-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  background: rgba(15, 23, 42, 0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-radius: 9999px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25),
+              0 0 0 1px rgba(255, 255, 255, 0.1);
+  pointer-events: auto;
+}
+
+.floating-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 9999px;
+  color: rgba(255, 255, 255, 0.6);
+  transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.floating-nav-item:active { transform: scale(0.92); }
+
+.floating-nav-item.active {
+  background: #FFFFFF;
+  color: #0F172A;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+@media (min-width: 1024px) {
+  .floating-nav-container { display: none; }
+}
+
+@supports (padding: env(safe-area-inset-bottom)) {
+  .floating-nav-container {
+    bottom: max(24px, env(safe-area-inset-bottom));
+  }
+}
+
+/* Terminal visual safety: avoid last line clipping at the bottom edge */
+.terminal-panel .xterm-viewport {
+  padding-bottom: 8px;
+  box-sizing: border-box;
+}
