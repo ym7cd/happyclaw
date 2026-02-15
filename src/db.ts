@@ -142,7 +142,8 @@ export function initDatabase(): void {
       folder TEXT NOT NULL,
       added_at TEXT NOT NULL,
       container_config TEXT,
-      created_by TEXT
+      created_by TEXT,
+      is_home INTEGER DEFAULT 0
     );
   `);
 
@@ -161,6 +162,9 @@ export function initDatabase(): void {
       notes TEXT,
       avatar_emoji TEXT,
       avatar_color TEXT,
+      ai_name TEXT,
+      ai_avatar_emoji TEXT,
+      ai_avatar_color TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_login_at TEXT,
@@ -225,6 +229,10 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
   ensureColumn('registered_groups', 'created_by', 'TEXT');
+  ensureColumn('registered_groups', 'is_home', 'INTEGER DEFAULT 0');
+  ensureColumn('users', 'ai_name', 'TEXT');
+  ensureColumn('users', 'ai_avatar_emoji', 'TEXT');
+  ensureColumn('users', 'ai_avatar_color', 'TEXT');
   ensureColumn('scheduled_tasks', 'created_by', 'TEXT');
 
   // Migration: remove UNIQUE constraint from registered_groups.folder
@@ -253,9 +261,10 @@ export function initDatabase(): void {
           custom_cwd TEXT,
           init_source_path TEXT,
           init_git_url TEXT,
-          created_by TEXT
+          created_by TEXT,
+          is_home INTEGER DEFAULT 0
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL FROM registered_groups;
+        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -300,6 +309,7 @@ export function initDatabase(): void {
       'init_source_path',
       'init_git_url',
       'created_by',
+      'is_home',
     ],
     ['trigger_pattern', 'requires_trigger'],
   );
@@ -317,6 +327,9 @@ export function initDatabase(): void {
     'notes',
     'avatar_emoji',
     'avatar_color',
+    'ai_name',
+    'ai_avatar_emoji',
+    'ai_avatar_color',
     'created_at',
     'updated_at',
     'last_login_at',
@@ -361,7 +374,20 @@ export function initDatabase(): void {
     ) WHERE jid LIKE 'web:%' AND folder != 'main' AND created_by IS NULL
   `);
 
-  const SCHEMA_VERSION = '12';
+  // Backfill owner for legacy web:main if missing.
+  db.exec(`
+    UPDATE registered_groups SET created_by = (
+      SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at ASC LIMIT 1
+    ) WHERE jid = 'web:main' AND created_by IS NULL
+  `);
+
+  // v13 migration: mark existing web:main group as is_home=1
+  db.exec(`
+    UPDATE registered_groups SET is_home = 1
+    WHERE jid = 'web:main' AND folder = 'main' AND is_home = 0
+  `);
+
+  const SCHEMA_VERSION = '13';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -765,6 +791,7 @@ export function getRegisteredGroup(
         init_source_path: string | null;
         init_git_url: string | null;
         created_by: string | null;
+        is_home: number;
       }
     | undefined;
   if (!row) return undefined;
@@ -782,13 +809,14 @@ export function getRegisteredGroup(
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
     created_by: row.created_by ?? undefined,
+    is_home: row.is_home === 1,
   };
 }
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -800,6 +828,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
     group.created_by ?? null,
+    group.is_home ? 1 : 0,
   );
 }
 
@@ -827,6 +856,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     init_source_path: string | null;
     init_git_url: string | null;
     created_by: string | null;
+    is_home: number;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -842,9 +872,136 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       initSourcePath: row.init_source_path ?? undefined,
       initGitUrl: row.init_git_url ?? undefined,
       created_by: row.created_by ?? undefined,
+      is_home: row.is_home === 1,
     };
   }
   return result;
+}
+
+/**
+ * Find a user's home group (is_home=1 + created_by=userId).
+ * For admin users, also matches web:main even if created_by differs
+ * (all admins share folder=main).
+ */
+export function getUserHomeGroup(
+  userId: string,
+): (RegisteredGroup & { jid: string }) | undefined {
+  // First try exact match: is_home=1 AND created_by=userId
+  let row = db
+    .prepare(
+      'SELECT * FROM registered_groups WHERE is_home = 1 AND created_by = ?',
+    )
+    .get(userId) as
+    | {
+        jid: string;
+        name: string;
+        folder: string;
+        added_at: string;
+        container_config: string | null;
+        execution_mode: string | null;
+        custom_cwd: string | null;
+        init_source_path: string | null;
+        init_git_url: string | null;
+        created_by: string | null;
+        is_home: number;
+      }
+    | undefined;
+
+  // Fallback for admin users: all admins share web:main (folder=main).
+  // If no exact match, check if the user is an admin and web:main exists.
+  if (!row) {
+    const user = db
+      .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
+      .get(userId) as { role: string } | undefined;
+    if (user?.role === 'admin') {
+      row = db
+        .prepare(
+          "SELECT * FROM registered_groups WHERE jid = 'web:main' AND is_home = 1",
+        )
+        .get() as typeof row | undefined;
+    }
+  }
+
+  if (!row) return undefined;
+
+  return {
+    jid: row.jid,
+    name: row.name,
+    folder: row.folder,
+    added_at: row.added_at,
+    containerConfig: row.container_config
+      ? JSON.parse(row.container_config)
+      : undefined,
+    executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
+    customCwd: row.custom_cwd ?? undefined,
+    initSourcePath: row.init_source_path ?? undefined,
+    initGitUrl: row.init_git_url ?? undefined,
+    created_by: row.created_by ?? undefined,
+    is_home: row.is_home === 1,
+  };
+}
+
+/**
+ * Ensure a user has a home group. If not, create one.
+ * Admin gets folder='main' with executionMode='host'.
+ * Member gets folder='home-{userId}' with executionMode='container'.
+ * Returns the JID of the home group.
+ */
+export function ensureUserHomeGroup(
+  userId: string,
+  role: 'admin' | 'member',
+  username?: string,
+): string {
+  const existing = getUserHomeGroup(userId);
+  if (existing) return existing.jid;
+
+  const now = new Date().toISOString();
+  const isAdmin = role === 'admin';
+  const jid = isAdmin ? 'web:main' : `web:home-${userId}`;
+  const folder = isAdmin ? 'main' : `home-${userId}`;
+
+  // For admin: check if web:main already exists (created by another admin)
+  // In that case, reuse it rather than overwriting created_by
+  if (isAdmin) {
+    const existingMain = getRegisteredGroup(jid);
+    if (existingMain) {
+      // web:main already exists.
+      // Ensure both is_home and created_by are set for owner-based routing.
+      const patched = { ...existingMain };
+      let changed = false;
+      if (!patched.is_home) {
+        patched.is_home = true;
+        changed = true;
+      }
+      if (!patched.created_by) {
+        patched.created_by = userId;
+        changed = true;
+      }
+      if (changed) {
+        setRegisteredGroup(jid, patched);
+      }
+      ensureChatExists(jid);
+      return jid;
+    }
+  }
+
+  const name = username ? `${username} Home` : (isAdmin ? 'Main' : 'Home');
+
+  const group: RegisteredGroup = {
+    name,
+    folder,
+    added_at: now,
+    executionMode: isAdmin ? 'host' : 'container',
+    created_by: userId,
+    is_home: true,
+  };
+
+  setRegisteredGroup(jid, group);
+
+  // Ensure chat row exists
+  ensureChatExists(jid);
+
+  return jid;
 }
 
 export function deleteChatHistory(chatJid: string): void {
@@ -1073,6 +1230,12 @@ function mapUserRow(row: Record<string, unknown>): User {
       typeof row.avatar_emoji === 'string' ? row.avatar_emoji : null,
     avatar_color:
       typeof row.avatar_color === 'string' ? row.avatar_color : null,
+    ai_name:
+      typeof row.ai_name === 'string' ? row.ai_name : null,
+    ai_avatar_emoji:
+      typeof row.ai_avatar_emoji === 'string' ? row.ai_avatar_emoji : null,
+    ai_avatar_color:
+      typeof row.ai_avatar_color === 'string' ? row.ai_avatar_color : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
     last_login_at:
@@ -1094,6 +1257,9 @@ function toUserPublic(user: User, lastActiveAt: string | null): UserPublic {
     notes: user.notes,
     avatar_emoji: user.avatar_emoji,
     avatar_color: user.avatar_color,
+    ai_name: user.ai_name,
+    ai_avatar_emoji: user.ai_avatar_emoji,
+    ai_avatar_color: user.ai_avatar_color,
     created_at: user.created_at,
     last_login_at: user.last_login_at,
     last_active_at: lastActiveAt,
@@ -1319,6 +1485,9 @@ export function updateUserFields(
       | 'notes'
       | 'avatar_emoji'
       | 'avatar_color'
+      | 'ai_name'
+      | 'ai_avatar_emoji'
+      | 'ai_avatar_color'
       | 'deleted_at'
     >
   >,
@@ -1373,6 +1542,18 @@ export function updateUserFields(
   if (updates.avatar_color !== undefined) {
     fields.push('avatar_color = ?');
     values.push(updates.avatar_color);
+  }
+  if (updates.ai_name !== undefined) {
+    fields.push('ai_name = ?');
+    values.push(updates.ai_name);
+  }
+  if (updates.ai_avatar_emoji !== undefined) {
+    fields.push('ai_avatar_emoji = ?');
+    values.push(updates.ai_avatar_emoji);
+  }
+  if (updates.ai_avatar_color !== undefined) {
+    fields.push('ai_avatar_color = ?');
+    values.push(updates.ai_avatar_color);
   }
   if (updates.deleted_at !== undefined) {
     fields.push('deleted_at = ?');

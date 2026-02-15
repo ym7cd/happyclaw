@@ -43,6 +43,7 @@ export interface RegisteredGroup {
   initSourcePath?: string; // 容器模式下复制来源的宿主机绝对路径
   initGitUrl?: string; // 容器模式下 clone 来源的 Git URL
   created_by?: string;
+  is_home?: boolean; // 用户主容器标记
 }
 
 export interface NewMessage {
@@ -132,6 +133,9 @@ export interface User {
   notes: string | null;
   avatar_emoji: string | null;
   avatar_color: string | null;
+  ai_name: string | null;
+  ai_avatar_emoji: string | null;
+  ai_avatar_color: string | null;
   created_at: string;
   updated_at: string;
   last_login_at: string | null;
@@ -150,6 +154,9 @@ export interface UserPublic {
   notes: string | null;
   avatar_emoji: string | null;
   avatar_color: string | null;
+  ai_name: string | null;
+  ai_avatar_emoji: string | null;
+  ai_avatar_color: string | null;
   created_at: string;
   last_login_at: string | null;
   last_active_at: string | null;

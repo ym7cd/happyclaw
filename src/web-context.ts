@@ -23,6 +23,7 @@ export interface WebDeps {
   advanceGlobalCursor: (cursor: MessageCursor) => void;
   reloadFeishuConnection?: (config: { appId: string; appSecret: string; enabled?: boolean }) => Promise<boolean>;
   reloadTelegramConnection?: (config: { botToken: string; enabled?: boolean }) => Promise<boolean>;
+  reloadUserIMConfig?: (userId: string, channel: 'feishu' | 'telegram') => Promise<boolean>;
   isFeishuConnected?: () => boolean;
   isTelegramConnected?: () => boolean;
 }
@@ -84,7 +85,8 @@ export function hasHostExecutionPermission(user: AuthUser): boolean {
 /**
  * Check if a user can access (view messages, send messages to) a group.
  * - admin → always true
- * - Feishu groups (jid does not start with 'web:') → true (visible to all)
+ * - is_home groups → only the owner (created_by) can access
+ * - IM groups (jid does not start with 'web:') → owner-only if owner can be resolved
  * - folder === 'main' → false for non-admin
  * - Web groups → only if created_by matches user.id (null created_by = admin-only)
  */
@@ -93,19 +95,36 @@ export function canAccessGroup(
   group: RegisteredGroup & { jid: string },
 ): boolean {
   if (user.role === 'admin') return true;
-  if (!group.jid.startsWith('web:')) return true;
+  if (group.is_home) return group.created_by === user.id;
+  // IM groups: check ownership if created_by is set.
+  // For legacy rows without created_by, resolve owner from sibling home group.
+  if (!group.jid.startsWith('web:')) {
+    if (group.created_by) return group.created_by === user.id;
+    const groups = deps?.getRegisteredGroups?.();
+    if (groups) {
+      const siblingHome = Object.values(groups).find(
+        (g) => g.is_home && g.folder === group.folder && !!g.created_by,
+      );
+      if (siblingHome?.created_by) {
+        return siblingHome.created_by === user.id;
+      }
+    }
+    return true;
+  }
   if (group.folder === 'main') return false;
   return group.created_by === user.id;
 }
 
 /**
  * Check if a user can modify (rename, delete, reset) a group.
- * Same as canAccessGroup, but Feishu groups are NOT modifiable by non-admin.
+ * - is_home groups cannot be renamed or deleted by anyone (including admin)
+ * - Same as canAccessGroup otherwise, but Feishu groups are NOT modifiable by non-admin.
  */
 export function canModifyGroup(
   user: { id: string; role: UserRole },
   group: RegisteredGroup & { jid: string },
 ): boolean {
+  if (group.is_home) return false;
   if (user.role === 'admin') return true;
   if (!group.jid.startsWith('web:')) return false;
   if (group.folder === 'main') return false;

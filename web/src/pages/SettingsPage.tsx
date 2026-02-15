@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { Menu } from 'lucide-react';
 
 import { useAuthStore } from '../stores/auth';
 import { SettingsNav } from '../components/settings/SettingsNav';
@@ -10,13 +11,14 @@ import { ProfileSection } from '../components/settings/ProfileSection';
 import { SecuritySection } from '../components/settings/SecuritySection';
 import { AboutSection } from '../components/settings/AboutSection';
 import { AppearanceSection } from '../components/settings/AppearanceSection';
+import { UserChannelsSection } from '../components/settings/UserChannelsSection';
 import { GroupsPage } from './GroupsPage';
 import { MemoryPage } from './MemoryPage';
 import { SkillsPage } from './SkillsPage';
 import { UsersPage } from './UsersPage';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['channels', 'claude', 'registration', 'appearance', 'profile', 'security', 'groups', 'memory', 'skills', 'users', 'about'];
+const VALID_TABS: SettingsTab[] = ['channels', 'claude', 'registration', 'appearance', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'users', 'about'];
 const SYSTEM_TABS: SettingsTab[] = ['channels', 'claude', 'registration', 'appearance'];
 const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'users'];
 
@@ -25,6 +27,7 @@ export function SettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [navOpen, setNavOpen] = useState(false);
 
   const hasSystemConfigPermission =
     currentUser?.role === 'admin' || !!currentUser?.permissions.includes('manage_system_config');
@@ -51,6 +54,7 @@ export function SettingsPage() {
   const handleTabChange = useCallback((tab: SettingsTab) => {
     setNotice(null);
     setError(null);
+    setNavOpen(false);
     setSearchParams({ tab }, { replace: true });
   }, [setSearchParams]);
 
@@ -60,6 +64,7 @@ export function SettingsPage() {
     registration: '注册管理',
     appearance: '外观设置',
     profile: '个人资料',
+    'my-channels': '消息通道',
     security: '安全与设备',
     groups: '会话管理',
     memory: '记忆管理',
@@ -70,12 +75,26 @@ export function SettingsPage() {
 
   return (
     <div className="min-h-full bg-slate-50 flex flex-col lg:flex-row">
+      {/* Mobile header */}
+      <div className="lg:hidden sticky top-0 z-10 flex items-center bg-white border-b border-slate-200 px-4 h-12">
+        <button
+          onClick={() => setNavOpen(true)}
+          className="p-1.5 -ml-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+          aria-label="打开导航"
+        >
+          <Menu className="w-5 h-5 text-slate-600" />
+        </button>
+        <span className="ml-3 text-sm font-semibold text-slate-900 truncate">{sectionTitle[activeTab]}</span>
+      </div>
+
       <SettingsNav
         activeTab={activeTab}
         onTabChange={handleTabChange}
         canManageSystemConfig={canManageSystemConfig}
         canManageUsers={!!canManageUsers}
         mustChangePassword={mustChangePassword}
+        open={navOpen}
+        onOpenChange={setNavOpen}
       />
 
       <div className="flex-1 overflow-y-auto">
@@ -112,6 +131,7 @@ export function SettingsPage() {
                 {activeTab === 'registration' && <RegistrationSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'appearance' && <AppearanceSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'profile' && <ProfileSection setNotice={setNotice} setError={setError} />}
+                {activeTab === 'my-channels' && <UserChannelsSection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'security' && <SecuritySection setNotice={setNotice} setError={setError} />}
                 {activeTab === 'about' && <AboutSection />}
               </div>

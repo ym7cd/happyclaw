@@ -50,6 +50,7 @@ import browseRoutes from './routes/browse.js';
 import {
   ensureChatExists,
   getRegisteredGroup,
+  getJidsByFolder,
   getSessionWithUser,
   storeMessageDirect,
   deleteUserSession,
@@ -231,10 +232,10 @@ async function handleWebUserMessage(
     },
   ]);
 
-  // For main chat, avoid piping into an active Feishu-driven run.
+  // For home chat, avoid piping into an active Feishu-driven run.
   // Force a new processing pass so reply channel can be decided correctly.
   let pipedToActive = false;
-  if (group.folder === 'main') {
+  if (group.is_home) {
     deps.queue.closeStdin(chatJid);
     deps.queue.enqueueMessageCheck(chatJid);
   } else {
@@ -425,11 +426,6 @@ function setupWebSocket(server: any): WebSocketServer {
 
         else if (msg.type === 'terminal_start') {
           try {
-            // Admin 权限检查
-            if (session.role !== 'admin') {
-              ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid || '', error: '终端操作需要管理员权限' }));
-              return;
-            }
             // Schema 验证
             const startValidation = TerminalStartSchema.safeParse(msg);
             if (!startValidation.success) {
@@ -444,6 +440,12 @@ function setupWebSocket(server: any): WebSocketServer {
             const group = deps.getRegisteredGroups()[chatJid];
             if (!group) {
               ws.send(JSON.stringify({ type: 'terminal_error', chatJid, error: '群组不存在' }));
+              return;
+            }
+            // Permission: user must be able to access the group
+            const groupWithJid = { ...group, jid: chatJid };
+            if (!canAccessGroup({ id: session.user_id, role: session.role }, groupWithJid)) {
+              ws.send(JSON.stringify({ type: 'terminal_error', chatJid, error: '无权访问该群组终端' }));
               return;
             }
             if ((group.executionMode || 'container') === 'host') {
@@ -666,14 +668,30 @@ function safeBroadcast(msg: WsMessageOut, adminOnly = false, ownerUserId?: strin
 
 /**
  * Get the owner userId for broadcast filtering.
- * Returns undefined for Feishu/Telegram groups and main session (visible to all).
- * For non-main Web groups, returns the created_by userId so only owner+admins see events.
+ * For any group with created_by, return that owner.
+ * For legacy IM groups missing created_by, try resolving owner from sibling home group.
  */
 function getGroupOwnerUserId(chatJid: string): string | undefined {
   const group = getRegisteredGroup(chatJid);
   if (!group) return undefined;
-  if (!chatJid.startsWith('web:')) return undefined; // Feishu/Telegram groups visible to all
-  if (group.folder === 'main') return undefined; // Main session visible to all
+
+  if (group.created_by) return group.created_by;
+
+  // Legacy fallback: IM group without created_by, resolve by sibling home group.
+  if (!chatJid.startsWith('web:')) {
+    const siblingJids = getJidsByFolder(group.folder);
+    for (const siblingJid of siblingJids) {
+      if (!siblingJid.startsWith('web:')) continue;
+      const siblingGroup = getRegisteredGroup(siblingJid);
+      if (siblingGroup?.is_home && siblingGroup.created_by) {
+        return siblingGroup.created_by;
+      }
+    }
+    return undefined;
+  }
+
+  if (group.is_home) return group.created_by ?? undefined;
+  if (group.folder === 'main') return undefined; // Legacy main session visible to all
   return group.created_by ?? undefined;
 }
 
@@ -683,22 +701,29 @@ function isHostGroupJid(chatJid: string): boolean {
   return !!group && isHostExecutionGroup(group);
 }
 
-const MAIN_WEB_JID = 'web:main';
-
 /**
  * Normalize chatJid for WebSocket broadcasts.
- * Feishu and Telegram groups sharing folder='main' are mapped to 'web:main' so the
- * frontend (which views 'web:main') can match all main-session events.
+ * IM groups (Feishu/Telegram) that share a folder with an is_home group are mapped
+ * to that home group's web JID so the frontend can match all home-session events.
  */
-function normalizeMainJid(chatJid: string): string {
-  if (chatJid === MAIN_WEB_JID) return chatJid;
+function normalizeHomeJid(chatJid: string): string {
+  if (chatJid.startsWith('web:')) return chatJid;
   const group = getRegisteredGroup(chatJid);
-  return group?.folder === 'main' ? MAIN_WEB_JID : chatJid;
+  if (!group) return chatJid;
+
+  // Find the web: JID that shares this folder (typically the is_home group)
+  const jids = getJidsByFolder(group.folder);
+  for (const jid of jids) {
+    if (jid.startsWith('web:')) {
+      return jid;
+    }
+  }
+  return chatJid;
 }
 
 export function broadcastToWebClients(chatJid: string, text: string): void {
   const timestamp = new Date().toISOString();
-  const jid = normalizeMainJid(chatJid);
+  const jid = normalizeHomeJid(chatJid);
   const ownerUserId = getGroupOwnerUserId(chatJid);
   safeBroadcast(
     { type: 'agent_reply', chatJid: jid, text, timestamp },
@@ -711,7 +736,7 @@ export function broadcastNewMessage(
   chatJid: string,
   msg: NewMessage & { is_from_me?: boolean },
 ): void {
-  const jid = normalizeMainJid(chatJid);
+  const jid = normalizeHomeJid(chatJid);
   const ownerUserId = getGroupOwnerUserId(chatJid);
   safeBroadcast(
     {
@@ -725,7 +750,7 @@ export function broadcastNewMessage(
 }
 
 export function broadcastTyping(chatJid: string, isTyping: boolean): void {
-  const jid = normalizeMainJid(chatJid);
+  const jid = normalizeHomeJid(chatJid);
   const ownerUserId = getGroupOwnerUserId(chatJid);
   safeBroadcast(
     { type: 'typing', chatJid: jid, isTyping },
@@ -735,7 +760,7 @@ export function broadcastTyping(chatJid: string, isTyping: boolean): void {
 }
 
 export function broadcastStreamEvent(chatJid: string, event: StreamEvent): void {
-  const jid = normalizeMainJid(chatJid);
+  const jid = normalizeHomeJid(chatJid);
   const ownerUserId = getGroupOwnerUserId(chatJid);
   safeBroadcast({ type: 'stream_event', chatJid: jid, event }, isHostGroupJid(chatJid), ownerUserId);
 }

@@ -17,6 +17,7 @@ interface AppearanceSectionProps extends SettingsNotification {}
 export function AppearanceSection({ setNotice, setError }: AppearanceSectionProps) {
   const { hasPermission } = useAuthStore();
 
+  const [appName, setAppName] = useState('');
   const [aiName, setAiName] = useState('');
   const [aiAvatarEmoji, setAiAvatarEmoji] = useState('');
   const [aiAvatarColor, setAiAvatarColor] = useState('');
@@ -30,6 +31,7 @@ export function AppearanceSection({ setNotice, setError }: AppearanceSectionProp
       setLoading(true);
       try {
         const data = await api.get<AppearanceConfig>('/api/config/appearance');
+        setAppName(data.appName);
         setAiName(data.aiName);
         setAiAvatarEmoji(data.aiAvatarEmoji);
         setAiAvatarColor(data.aiAvatarColor);
@@ -47,10 +49,12 @@ export function AppearanceSection({ setNotice, setError }: AppearanceSectionProp
     setNotice(null);
     try {
       const data = await api.put<AppearanceConfig>('/api/config/appearance', {
+        appName: appName.trim() || undefined,
         aiName: aiName.trim(),
         aiAvatarEmoji,
         aiAvatarColor,
       });
+      setAppName(data.appName);
       setAiName(data.aiName);
       setAiAvatarEmoji(data.aiAvatarEmoji);
       setAiAvatarColor(data.aiAvatarColor);
@@ -94,6 +98,20 @@ export function AppearanceSection({ setNotice, setError }: AppearanceSectionProp
         </div>
       </div>
 
+      {/* App Name */}
+      <div>
+        <h3 className="text-base font-semibold text-slate-900 mb-4">项目名称</h3>
+        <Input
+          type="text"
+          value={appName}
+          onChange={(e) => setAppName(e.target.value)}
+          maxLength={32}
+          placeholder="HappyClaw"
+          className="max-w-xs"
+        />
+        <p className="text-xs text-slate-500 mt-1">显示在 Logo 旁边和欢迎页的项目名称</p>
+      </div>
+
       {/* AI Name */}
       <div>
         <h3 className="text-base font-semibold text-slate-900 mb-4">AI 名称</h3>
@@ -105,7 +123,7 @@ export function AppearanceSection({ setNotice, setError }: AppearanceSectionProp
           placeholder="HappyClaw"
           className="max-w-xs"
         />
-        <p className="text-xs text-slate-500 mt-1">显示在聊天界面和消息中的 AI 名称，最多 32 个字符</p>
+        <p className="text-xs text-slate-500 mt-1">显示在聊天消息中的 AI 助手名称</p>
       </div>
 
       {/* AI Avatar Emoji */}

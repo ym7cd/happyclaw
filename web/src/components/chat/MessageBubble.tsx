@@ -68,6 +68,8 @@ function ReasoningBlock({ content }: { content: string }) {
 export function MessageBubble({ message, showTime, thinkingContent }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
   const [expandedImage, setExpandedImage] = useState<string | null>(null);
+  const currentUser = useAuthStore((s) => s.user);
+  const appearance = useAuthStore((s) => s.appearance);
   const isUser = !message.is_from_me;
   const time = new Date(message.timestamp)
     .toLocaleString('zh-CN', {
@@ -180,16 +182,17 @@ export function MessageBubble({ message, showTime, thinkingContent }: MessageBub
     );
   }
 
-  // AI message: avatar + card layout
-  const appearance = useAuthStore((s) => s.appearance);
-  const senderName = appearance?.aiName || message.sender_name || 'AI';
+  // AI message: avatar + card layout — user-level AI appearance takes priority
+  const senderName = currentUser?.ai_name || appearance?.aiName || message.sender_name || 'AI';
+  const aiEmoji = currentUser?.ai_avatar_emoji || appearance?.aiAvatarEmoji;
+  const aiColor = currentUser?.ai_avatar_color || appearance?.aiAvatarColor;
 
   return (
     <div className="group flex gap-3 mb-4">
       {/* Avatar */}
       <EmojiAvatar
-        emoji={appearance?.aiAvatarEmoji}
-        color={appearance?.aiAvatarColor}
+        emoji={aiEmoji}
+        color={aiColor}
         fallbackChar={senderName[0]}
         size="md"
       />
@@ -203,7 +206,7 @@ export function MessageBubble({ message, showTime, thinkingContent }: MessageBub
         </div>
 
         {/* Card */}
-        <div className="relative bg-white rounded-xl border border-slate-100 border-l-[3px] border-l-brand-400 px-5 py-4">
+        <div className="relative bg-white rounded-xl border border-slate-100 border-l-[3px] border-l-brand-400 px-5 py-4 max-lg:bg-white/90 max-lg:backdrop-blur-sm">
           {/* Copy button */}
           <button
             onClick={handleCopy}

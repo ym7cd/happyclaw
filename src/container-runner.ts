@@ -43,7 +43,10 @@ export interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
+  /** @deprecated Use isHome + isAdminHome instead */
   isMain: boolean;
+  isHome?: boolean;
+  isAdminHome?: boolean;
   isScheduledTask?: boolean;
   images?: Array<{ data: string; mimeType?: string }>;
 }
@@ -64,7 +67,7 @@ interface VolumeMount {
 
 function buildVolumeMounts(
   group: RegisteredGroup,
-  isMain: boolean,
+  isAdminHome: boolean,
   mountUserSkills = true,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
@@ -72,33 +75,32 @@ function buildVolumeMounts(
   const projectRoot = process.cwd();
 
   // Global memory directory:
-  // - main group: read-write
-  // - non-main groups: read-only
-  // Keep a stable /workspace/global path across all execution contexts.
+  // - admin home: read-write
+  // - member home and non-home groups: read-only
   const globalDir = path.join(GROUPS_DIR, 'global');
   fs.mkdirSync(globalDir, { recursive: true });
   mounts.push({
     hostPath: globalDir,
     containerPath: '/workspace/global',
-    readonly: !isMain,
+    readonly: !isAdminHome,
   });
 
-  if (isMain) {
-    // Main gets the entire project root mounted
+  if (isAdminHome) {
+    // Admin home gets the entire project root mounted
     mounts.push({
       hostPath: projectRoot,
       containerPath: '/workspace/project',
       readonly: false,
     });
 
-    // Main also gets its group folder as the working directory
+    // Admin home also gets its group folder as the working directory
     mounts.push({
       hostPath: path.join(GROUPS_DIR, group.folder),
       containerPath: '/workspace/group',
       readonly: false,
     });
   } else {
-    // Other groups only get their own folder
+    // Member home and non-home groups only get their own folder
     mounts.push({
       hostPath: path.join(GROUPS_DIR, group.folder),
       containerPath: '/workspace/group',
@@ -231,7 +233,7 @@ function buildVolumeMounts(
     const validatedMounts = validateAdditionalMounts(
       group.containerConfig.additionalMounts,
       group.name,
-      isMain,
+      isAdminHome,
     );
     mounts.push(...validatedMounts);
   }
@@ -270,14 +272,16 @@ export async function runContainerAgent(
   const groupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  // Determine if this is an admin home container (full privileges)
+  const isAdminHome = !!group.is_home && group.folder === 'main';
   // User-level skills (~/.claude/skills/) are admin-only:
-  // main session is always admin; for other groups, check creator's role
-  let shouldMountUserSkills = input.isMain;
+  // admin home always gets skills; for other groups, check creator's role
+  let shouldMountUserSkills = isAdminHome;
   if (!shouldMountUserSkills && group.created_by) {
     const creator = getUserById(group.created_by);
     shouldMountUserSkills = creator?.role === 'admin';
   }
-  const mounts = buildVolumeMounts(group, input.isMain, shouldMountUserSkills);
+  const mounts = buildVolumeMounts(group, isAdminHome, shouldMountUserSkills);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `happyclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
@@ -731,7 +735,7 @@ export async function runContainerAgent(
 
 export function writeTasksSnapshot(
   groupFolder: string,
-  isMain: boolean,
+  isAdminHome: boolean,
   tasks: Array<{
     id: string;
     groupFolder: string;
@@ -746,8 +750,8 @@ export function writeTasksSnapshot(
   const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
-  // Main sees all tasks, others only see their own
-  const filteredTasks = isMain
+  // Admin home sees all tasks, others only see their own
+  const filteredTasks = isAdminHome
     ? tasks
     : tasks.filter((t) => t.groupFolder === groupFolder);
 
@@ -764,20 +768,20 @@ export interface AvailableGroup {
 
 /**
  * Write available groups snapshot for the container to read.
- * Only main group can see all available groups (for activation).
- * Non-main groups only see their own registration status.
+ * Only admin home can see all available groups (for activation).
+ * Other groups see nothing (they can't activate groups).
  */
 export function writeGroupsSnapshot(
   groupFolder: string,
-  isMain: boolean,
+  isAdminHome: boolean,
   groups: AvailableGroup[],
   registeredJids: Set<string>,
 ): void {
   const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
 
-  // Main sees all groups; others see nothing (they can't activate groups)
-  const visibleGroups = isMain ? groups : [];
+  // Admin home sees all groups; others see nothing (they can't activate groups)
+  const visibleGroups = isAdminHome ? groups : [];
 
   const groupsFile = path.join(groupIpcDir, 'available_groups.json');
   fs.writeFileSync(

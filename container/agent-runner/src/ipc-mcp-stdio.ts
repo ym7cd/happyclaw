@@ -18,7 +18,10 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.HAPPYCLAW_CHAT_JID!;
 const groupFolder = process.env.HAPPYCLAW_GROUP_FOLDER!;
-const isMain = process.env.HAPPYCLAW_IS_MAIN === '1';
+const _isHome = process.env.HAPPYCLAW_IS_HOME === '1';
+const isAdminHome = process.env.HAPPYCLAW_IS_ADMIN_HOME === '1';
+// Effective permission: cross-group operations require admin home
+const hasCrossGroupAccess = isAdminHome;
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -86,7 +89,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     schedule_type: z.enum(['cron', 'interval', 'once']).describe('cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time'),
     schedule_value: z.string().describe('cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)'),
     context_mode: z.enum(['group', 'isolated']).default('group').describe('group=runs with chat history and memory, isolated=fresh session (include context in prompt)'),
-    target_group_jid: z.string().optional().describe('(Main group only) JID of the group to schedule the task for. Defaults to the current group.'),
+    target_group_jid: z.string().optional().describe('(Admin home only) JID of the group to schedule the task for. Defaults to the current group.'),
   },
   async (args) => {
     // Validate schedule_value before writing IPC
@@ -117,8 +120,8 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       }
     }
 
-    // Non-main groups can only schedule for themselves
-    const targetJid = isMain && args.target_group_jid ? args.target_group_jid : chatJid;
+    // Only admin home can schedule tasks for other groups
+    const targetJid = hasCrossGroupAccess && args.target_group_jid ? args.target_group_jid : chatJid;
 
     const data = {
       type: 'schedule_task',
@@ -141,7 +144,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 
 server.tool(
   'list_tasks',
-  "List all scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
+  "List all scheduled tasks. From admin home: shows all tasks. From other groups: shows only that group's tasks.",
   {},
   async () => {
     const tasksFile = path.join(IPC_DIR, 'current_tasks.json');
@@ -153,7 +156,7 @@ server.tool(
 
       const allTasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
 
-      const tasks = isMain
+      const tasks = hasCrossGroupAccess
         ? allTasks
         : allTasks.filter((t: { groupFolder: string }) => t.groupFolder === groupFolder);
 
@@ -186,7 +189,7 @@ server.tool(
       type: 'pause_task',
       taskId: args.task_id,
       groupFolder,
-      isMain,
+      isMain: hasCrossGroupAccess,
       timestamp: new Date().toISOString(),
     };
 
@@ -205,7 +208,7 @@ server.tool(
       type: 'resume_task',
       taskId: args.task_id,
       groupFolder,
-      isMain,
+      isMain: hasCrossGroupAccess,
       timestamp: new Date().toISOString(),
     };
 
@@ -224,7 +227,7 @@ server.tool(
       type: 'cancel_task',
       taskId: args.task_id,
       groupFolder,
-      isMain,
+      isMain: hasCrossGroupAccess,
       timestamp: new Date().toISOString(),
     };
 
@@ -236,7 +239,7 @@ server.tool(
 
 server.tool(
   'register_group',
-  `Register a new group so the agent can respond to messages there. Main group only.
+  `Register a new group so the agent can respond to messages there. Admin home only.
 
 Use available_groups.json to find the JID for a group. The folder name should be lowercase with hyphens (e.g., "family-chat").`,
   {
@@ -245,9 +248,9 @@ Use available_groups.json to find the JID for a group. The folder name should be
     folder: z.string().describe('Folder name for group files (lowercase, hyphens, e.g., "family-chat")'),
   },
   async (args) => {
-    if (!isMain) {
+    if (!hasCrossGroupAccess) {
       return {
-        content: [{ type: 'text' as const, text: 'Only the main group can register new groups.' }],
+        content: [{ type: 'text' as const, text: 'Only the admin home container can register new groups.' }],
         isError: true,
       };
     }

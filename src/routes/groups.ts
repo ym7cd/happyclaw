@@ -122,18 +122,24 @@ function buildGroupsPayload(user: AuthUser): Record<
     name: string;
     folder: string;
     added_at: string;
-    kind: 'main' | 'feishu' | 'web';
+    kind: 'home' | 'feishu' | 'web';
     editable: boolean;
     deletable: boolean;
     lastMessage?: string;
     lastMessageTime?: string;
     execution_mode: 'container' | 'host';
     custom_cwd?: string;
+    is_home?: boolean;
   }
 > {
   const groups = getAllRegisteredGroups();
   const chats = new Map(getAllChats().map((chat) => [chat.jid, chat]));
   const isAdmin = hasHostExecutionPermission(user);
+  const homeFolders = new Set(
+    Object.entries(groups)
+      .filter(([jid, group]) => jid.startsWith('web:') && !!group.is_home)
+      .map(([_, group]) => group.folder),
+  );
 
   const result: Record<
     string,
@@ -141,25 +147,30 @@ function buildGroupsPayload(user: AuthUser): Record<
       name: string;
       folder: string;
       added_at: string;
-      kind: 'main' | 'feishu' | 'web';
+      kind: 'home' | 'feishu' | 'web';
       editable: boolean;
       deletable: boolean;
       lastMessage?: string;
       lastMessageTime?: string;
       execution_mode: 'container' | 'host';
       custom_cwd?: string;
+      is_home?: boolean;
     }
   > = {};
 
   // 先过滤出要显示的群组 jid
   const visibleEntries: Array<[string, typeof groups[string]]> = [];
   for (const [jid, group] of Object.entries(groups)) {
-    const isMain = group.folder === 'main';
+    const isHome = !!group.is_home;
     const isWeb = jid.startsWith('web:');
     const isHost = isHostExecutionGroup(group);
 
-    if (isMain && !isWeb) continue;
-    if (isHost && !isAdmin) continue;
+    // Hide IM channels that belong to a home folder.
+    // These are merged into the home conversation in UI and message APIs.
+    if (!isWeb && !isHome && homeFolders.has(group.folder)) continue;
+
+    // Host execution groups require admin unless it's the user's own home group
+    if (isHost && !isAdmin && !(isHome && group.created_by === user.id)) continue;
 
     // User isolation: non-admin can only see their own web groups
     if (!canAccessGroup({ id: user.id, role: user.role }, { ...group, jid })) continue;
@@ -181,7 +192,7 @@ function buildGroupsPayload(user: AuthUser): Record<
   }
 
   for (const [jid, group] of visibleEntries) {
-    const isMain = group.folder === 'main';
+    const isHome = !!group.is_home;
     const isWeb = jid.startsWith('web:');
 
     const latest = latestByJid.get(jid);
@@ -190,9 +201,9 @@ function buildGroupsPayload(user: AuthUser): Record<
       name: group.name,
       folder: group.folder,
       added_at: group.added_at,
-      kind: isMain ? 'main' : isWeb ? 'web' : 'feishu',
-      editable: isWeb && !isMain,
-      deletable: isWeb && !isMain,
+      kind: isHome ? 'home' : isWeb ? 'web' : 'feishu',
+      editable: isWeb && !isHome,
+      deletable: isWeb && !isHome,
       lastMessage: latest?.content,
       lastMessageTime:
         latest?.timestamp ||
@@ -200,6 +211,7 @@ function buildGroupsPayload(user: AuthUser): Record<
         group.added_at,
       execution_mode: group.executionMode || 'container',
       custom_cwd: isAdmin ? group.customCwd : undefined,
+      is_home: isHome || undefined,
     };
   }
 
@@ -818,6 +830,8 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     delete deps.getSessions()[group.folder];
     for (const siblingJid of siblingJids) {
       deleteChatHistory(siblingJid);
+      // Re-create the chats row so subsequent messages work properly
+      ensureChatExists(siblingJid);
       deps.setLastAgentTimestamp(siblingJid, { timestamp: '', id: '' });
     }
   } catch (err) {
@@ -859,13 +873,16 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   const limitRaw = parseInt(c.req.query('limit') || '50', 10);
   const limit = Math.min(Number.isFinite(limitRaw) ? Math.max(1, limitRaw) : 50, 200);
 
-  // 主容器合并查询：将 web:main 和所有 feishu:xxx（folder=main）的消息合并展示
+  // is_home 群组合并查询：将同 folder 下所有 JID（web + feishu/telegram IM 通道）的消息合并展示
+  // Only merge siblings that belong to the same owner to prevent cross-user data leakage
   const queryJids = [jid];
-  if (group.folder === 'main') {
-    const allGroups = getAllRegisteredGroups();
-    for (const [otherJid, otherGroup] of Object.entries(allGroups)) {
-      if (otherJid !== jid && otherGroup.folder === 'main') {
-        queryJids.push(otherJid);
+  if (group.is_home && group.created_by) {
+    const siblingJids = getJidsByFolder(group.folder);
+    for (const siblingJid of siblingJids) {
+      if (siblingJid === jid) continue;
+      const siblingGroup = getRegisteredGroup(siblingJid);
+      if (siblingGroup && siblingGroup.created_by === group.created_by) {
+        queryJids.push(siblingJid);
       }
     }
   }

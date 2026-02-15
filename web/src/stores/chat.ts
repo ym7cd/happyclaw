@@ -160,11 +160,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         let nextCurrent = currentStillExists ? state.currentGroup : null;
         if (!nextCurrent) {
-          const mainEntry = Object.entries(data.groups).find(
-            ([_, group]) => group.folder === 'main',
+          const homeEntry = Object.entries(data.groups).find(
+            ([_, group]) => group.is_home,
           );
-          if (mainEntry) {
-            nextCurrent = mainEntry[0];
+          if (homeEntry) {
+            nextCurrent = homeEntry[0];
           } else {
             nextCurrent = Object.keys(data.groups)[0] || null;
           }
@@ -449,10 +449,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextStreaming[jid];
         delete nextPendingThinking[jid];
 
-        const nextCurrent =
-          s.currentGroup === jid
-            ? Object.entries(nextGroups).find(([_, g]) => g.folder === 'main')?.[0] || null
-            : s.currentGroup;
+        let nextCurrent = s.currentGroup === jid ? null : s.currentGroup;
+        // Auto-select first remaining group after deletion
+        if (nextCurrent === null) {
+          const remainingJids = Object.keys(nextGroups);
+          nextCurrent = remainingJids.length > 0 ? remainingJids[0] : null;
+        }
 
         return {
           groups: nextGroups,

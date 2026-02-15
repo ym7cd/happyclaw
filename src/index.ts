@@ -58,6 +58,7 @@ import {
   deleteExpiredSessions,
   deleteTask,
   ensureChatExists,
+  ensureUserHomeGroup,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -67,7 +68,9 @@ import {
   getNewMessages,
   getRouterState,
   getTaskById,
+  getUserHomeGroup,
   initDatabase,
+  listUsers,
   setLastGroupSync,
   setRegisteredGroup,
   setRouterState,
@@ -77,24 +80,15 @@ import {
   updateChatName,
   updateTask,
 } from './db.js';
-import {
-  connectFeishu,
-  isFeishuConnected,
-  sendFeishuMessage,
-  setFeishuTyping,
-  stopFeishu,
-  syncFeishuGroups,
-} from './feishu.js';
+// feishu.js deprecated exports are no longer needed; imManager handles all connections
+import { imManager } from './im-manager.js';
 import {
   getFeishuProviderConfigWithSource,
   getTelegramProviderConfigWithSource,
+  getUserFeishuConfig,
+  getUserTelegramConfig,
 } from './runtime-config.js';
-import {
-  connectTelegram,
-  sendTelegramMessage,
-  disconnectTelegram,
-  isTelegramConnected,
-} from './telegram.js';
+import type { FeishuConnectConfig, TelegramConnectConfig } from './im-manager.js';
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { MessageCursor, NewMessage, RegisteredGroup } from './types.js';
@@ -167,8 +161,9 @@ function sendSystemMessage(jid: string, type: string, detail: string): void {
 }
 
 async function setTyping(jid: string, isTyping: boolean): Promise<void> {
-  const chatId = jid.replace(/^feishu:/, '');
-  await setFeishuTyping(chatId, isTyping);
+  if (jid.startsWith('feishu:')) {
+    await imManager.setFeishuTyping(jid, isTyping);
+  }
   broadcastTyping(jid, isTyping);
 }
 
@@ -228,15 +223,57 @@ function loadState(): void {
     }
   }
 
-  // Always ensure the web:main entry exists, even when default-groups.json is empty.
-  // 必须精确检查 web:main JID 是否存在（而非仅检查 folder='main'），
-  // 因为自动注册到主容器的飞书群组也有 folder='main'，会导致误判。
-  if (!registeredGroups[DEFAULT_MAIN_JID]) {
-    registerGroup(DEFAULT_MAIN_JID, {
-      name: DEFAULT_MAIN_NAME,
-      folder: MAIN_GROUP_FOLDER,
-      added_at: new Date().toISOString(),
-    });
+  // Ensure every active user has a home group (is_home=true).
+  // Admin → folder='main', executionMode='host'
+  // Member → folder='home-{userId}', executionMode='container'
+  try {
+    // Paginate through all active users
+    const activeUsers: Array<{ id: string; role: string; username: string }> = [];
+    {
+      let page = 1;
+      while (true) {
+        const result = listUsers({ status: 'active', page, pageSize: 200 });
+        activeUsers.push(...result.users);
+        if (activeUsers.length >= result.total) break;
+        page++;
+      }
+    }
+    for (const user of activeUsers) {
+      const homeJid = ensureUserHomeGroup(user.id, user.role as 'admin' | 'member', user.username);
+      // Refresh in-memory cache if a new home group was created
+      if (!registeredGroups[homeJid]) {
+        registeredGroups = getAllRegisteredGroups();
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Failed to ensure user home groups');
+  }
+
+  // Enforce execution mode on all is_home groups:
+  // - admin home → host mode
+  // - member home → container mode
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (!group.is_home) continue;
+
+    // Determine expected mode based on the owner's role
+    // Admin home groups use host mode, member home groups use container mode
+    const isAdminHome = group.folder === MAIN_GROUP_FOLDER;
+    const expectedMode = isAdminHome ? 'host' : 'container';
+
+    if (group.executionMode !== expectedMode) {
+      group.executionMode = expectedMode;
+      setRegisteredGroup(jid, group);
+      registeredGroups[jid] = group;
+      // 清除旧 session，避免恢复不兼容的 session
+      if (sessions[group.folder]) {
+        logger.info(
+          { folder: group.folder, expectedMode },
+          'Clearing stale session during execution mode migration',
+        );
+        delete sessions[group.folder];
+        deleteSession(group.folder);
+      }
+    }
   }
 
   // Initialize global CLAUDE.md from template if missing (cold start / reset)
@@ -259,27 +296,6 @@ function loadState(): void {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
           logger.warn({ err }, 'Failed to initialize global CLAUDE.md');
         }
-      }
-    }
-  }
-
-  // Main 会话默认使用宿主机模式（不设置 customCwd，使用默认 groups/main 目录，
-  // 避免触发 allowlist 校验导致受限部署失败）
-  // 注意：ensureColumn 给 execution_mode 设了 DEFAULT 'container'，
-  // 所以必须用 !== 'host' 而非 !executionMode 来检测未迁移的记录
-  for (const [jid, group] of Object.entries(registeredGroups)) {
-    if (group.folder === MAIN_GROUP_FOLDER && group.executionMode !== 'host') {
-      group.executionMode = 'host';
-      setRegisteredGroup(jid, group);
-      registeredGroups[jid] = group;
-      // 清除容器时代的 session，避免宿主机模式尝试恢复不兼容的 session
-      if (sessions[group.folder]) {
-        logger.info(
-          { folder: group.folder },
-          'Clearing stale container-era session during host mode migration',
-        );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
       }
     }
   }
@@ -329,7 +345,14 @@ async function syncGroupMetadata(force = false): Promise<void> {
     }
   }
 
-  await syncFeishuGroups();
+  // Sync groups via any connected user's Feishu instance
+  const connectedUserIds = imManager.getConnectedUserIds();
+  for (const uid of connectedUserIds) {
+    if (imManager.isFeishuConnected(uid)) {
+      await imManager.syncFeishuGroups(uid);
+      break; // Only need one sync
+    }
+  }
 }
 
 /**
@@ -409,7 +432,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
-  const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+  const isHome = !!group.is_home;
 
   // Get all messages since last agent interaction
   const sinceCursor = lastAgentTimestamp[chatJid] || EMPTY_CURSOR;
@@ -419,8 +442,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const hasWebInput = missedMessages.some((m) => m.sender === 'web-user');
   const hasFeishuInput = missedMessages.some((m) => m.sender !== 'web-user');
+  // Home groups only reply to Feishu when there's actual Feishu input
+  // (prevents Web-initiated messages from triggering Feishu replies)
   const shouldReplyToFeishu =
-    chatJid.startsWith('feishu:') && (!isMainGroup || hasFeishuInput);
+    chatJid.startsWith('feishu:') && (!isHome || hasFeishuInput);
 
   const prompt = formatMessages(missedMessages);
 
@@ -657,14 +682,16 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
 ): Promise<{ status: 'success' | 'error'; error?: string }> {
-  const isMain = group.folder === MAIN_GROUP_FOLDER;
+  const isHome = !!group.is_home;
+  // For the agent-runner: isMain means this is an admin home container (full privileges)
+  const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
   writeTasksSnapshot(
     group.folder,
-    isMain,
+    isAdminHome,
     tasks.map((t) => ({
       id: t.id,
       groupFolder: t.group_folder,
@@ -676,11 +703,11 @@ async function runAgent(
     })),
   );
 
-  // Update available groups snapshot (main group only can see all groups)
+  // Update available groups snapshot (admin home only can see all groups)
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
     group.folder,
-    isMain,
+    isAdminHome,
     availableGroups,
     new Set(Object.keys(registeredGroups)),
   );
@@ -717,7 +744,9 @@ async function runAgent(
           sessionId,
           groupFolder: group.folder,
           chatJid,
-          isMain,
+          isMain: isAdminHome,
+          isHome,
+          isAdminHome,
           images,
         },
         onProcessCb,
@@ -731,7 +760,9 @@ async function runAgent(
           sessionId,
           groupFolder: group.folder,
           chatJid,
-          isMain,
+          isMain: isAdminHome,
+          isHome,
+          isAdminHome,
           images,
         },
         onProcessCb,
@@ -780,18 +811,16 @@ async function sendMessage(
   const sendToFeishu = options.sendToFeishu ?? jid.startsWith('feishu:');
   try {
     if (sendToFeishu && jid.startsWith('feishu:')) {
-      const chatId = jid.replace(/^feishu:/, '');
       try {
-        await sendFeishuMessage(chatId, text);
+        await imManager.sendFeishuMessage(jid, text);
       } catch (err) {
         logger.error({ jid, err }, 'Failed to send message to Feishu');
       }
     }
 
     if (jid.startsWith('telegram:')) {
-      const chatId = jid.replace(/^telegram:/, '');
       try {
-        await sendTelegramMessage(chatId, text);
+        await imManager.sendTelegramMessage(jid, text);
       } catch (err) {
         logger.error({ jid, err }, 'Failed to send message to Telegram');
       }
@@ -827,6 +856,25 @@ async function sendMessage(
   }
 }
 
+/**
+ * Check if a source group is authorized to send IPC messages to a target group.
+ * - Admin home can send to any group.
+ * - Non-home groups can only send to groups sharing the same folder.
+ * - Member home groups can send to groups created by the same user.
+ */
+function canSendCrossGroupMessage(
+  isAdminHome: boolean,
+  isHome: boolean,
+  sourceFolder: string,
+  sourceGroupEntry: RegisteredGroup | undefined,
+  targetGroup: RegisteredGroup | undefined,
+): boolean {
+  if (isAdminHome) return true;
+  if (targetGroup && targetGroup.folder === sourceFolder) return true;
+  if (isHome && targetGroup && sourceGroupEntry?.created_by != null && targetGroup.created_by === sourceGroupEntry.created_by) return true;
+  return false;
+}
+
 function startIpcWatcher(): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -853,7 +901,12 @@ function startIpcWatcher(): void {
     }
 
     for (const sourceGroup of groupFolders) {
-      const isMain = sourceGroup === MAIN_GROUP_FOLDER;
+      // Determine if this IPC directory belongs to an admin home group
+      const sourceGroupEntry = Object.values(registeredGroups).find(
+        (g) => g.folder === sourceGroup,
+      );
+      const isAdminHome = !!(sourceGroupEntry?.is_home && sourceGroup === MAIN_GROUP_FOLDER);
+      const isHome = !!sourceGroupEntry?.is_home;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
@@ -868,12 +921,8 @@ function startIpcWatcher(): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
+                if (canSendCrossGroupMessage(isAdminHome, isHome, sourceGroup, sourceGroupEntry, targetGroup)) {
                   await sendMessage(data.chatJid, data.text);
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
@@ -931,7 +980,7 @@ function startIpcWatcher(): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain);
+              await processTaskIpc(data, sourceGroup, isAdminHome);
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
@@ -989,7 +1038,7 @@ async function processTaskIpc(
     containerConfig?: RegisteredGroup['containerConfig'];
   },
   sourceGroup: string, // Verified identity from IPC directory
-  isMain: boolean, // Verified from directory path
+  isAdminHome: boolean, // Whether source is admin home container
 ): Promise<void> {
   switch (data.type) {
     case 'schedule_task':
@@ -1013,8 +1062,8 @@ async function processTaskIpc(
 
         const targetFolder = targetGroupEntry.folder;
 
-        // Authorization: non-main groups can only schedule for themselves
-        if (!isMain && targetFolder !== sourceGroup) {
+        // Authorization: non-admin-home groups can only schedule for themselves
+        if (!isAdminHome && targetFolder !== sourceGroup) {
           logger.warn(
             { sourceGroup, targetFolder },
             'Unauthorized schedule_task attempt blocked',
@@ -1087,7 +1136,7 @@ async function processTaskIpc(
     case 'pause_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task && (isAdminHome || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'paused' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -1105,7 +1154,7 @@ async function processTaskIpc(
     case 'resume_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task && (isAdminHome || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'active' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -1123,7 +1172,7 @@ async function processTaskIpc(
     case 'cancel_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (task && (isAdminHome || task.group_folder === sourceGroup)) {
           deleteTask(data.taskId);
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -1139,8 +1188,8 @@ async function processTaskIpc(
       break;
 
     case 'refresh_groups':
-      // Only main group can request a refresh
-      if (isMain) {
+      // Only admin home group can request a refresh
+      if (isAdminHome) {
         logger.info(
           { sourceGroup },
           'Group metadata refresh requested via IPC',
@@ -1163,8 +1212,8 @@ async function processTaskIpc(
       break;
 
     case 'register_group':
-      // Only main group can register new groups
-      if (!isMain) {
+      // Only admin home group can register new groups
+      if (!isAdminHome) {
         logger.warn(
           { sourceGroup },
           'Unauthorized register_group attempt blocked',
@@ -1227,7 +1276,7 @@ async function startMessageLoop(): Promise<void> {
           const group = registeredGroups[chatJid];
           if (!group) continue;
 
-          const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+          const isHome = !!group.is_home;
 
           // Pull all messages since lastAgentTimestamp to preserve full context.
           const allPending = getMessagesSince(
@@ -1237,16 +1286,16 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
 
-          // Main chat should always run as a fresh batch.
+          // Home chat should always run as a fresh batch.
           // This avoids mixing "web-only reply mode" and "reply-to-Feishu mode"
           // inside the same long-lived container stream.
-          if (isMainGroup) {
-            // Force current main container (if any) to wind down quickly so
+          if (isHome) {
+            // Force current home container (if any) to wind down quickly so
             // newly arrived Feishu/Web messages are not blocked by 30min idle hold.
             queue.closeStdin(chatJid);
             logger.debug(
               { chatJid },
-              'Main group message received, forcing stdin close before enqueue',
+              'Home group message received, forcing stdin close before enqueue',
             );
             queue.enqueueMessageCheck(chatJid);
             continue;
@@ -1372,6 +1421,49 @@ async function ensureDockerRunning(): Promise<void> {
   }
 }
 
+/**
+ * Build the onNewChat callback for IM connections.
+ * Feishu/Telegram chats auto-register to the user's home group folder.
+ */
+function buildOnNewChat(userId: string, homeFolder: string): (chatJid: string, chatName: string) => void {
+  return (chatJid, chatName) => {
+    if (registeredGroups[chatJid]) return;
+    registerGroup(chatJid, {
+      name: chatName,
+      folder: homeFolder,
+      added_at: new Date().toISOString(),
+      created_by: userId,
+    });
+    logger.info({ chatJid, chatName, userId, homeFolder }, 'Auto-registered IM chat');
+  };
+}
+
+/**
+ * Connect IM channels for a specific user via imManager.
+ * Reads the user's IM config and connects if enabled.
+ */
+async function connectUserIMChannels(
+  userId: string,
+  homeFolder: string,
+  feishuConfig?: FeishuConnectConfig | null,
+  telegramConfig?: TelegramConnectConfig | null,
+  ignoreMessagesBefore?: number,
+): Promise<{ feishu: boolean; telegram: boolean }> {
+  const onNewChat = buildOnNewChat(userId, homeFolder);
+  let feishu = false;
+  let telegram = false;
+
+  if (feishuConfig && feishuConfig.enabled !== false && feishuConfig.appId && feishuConfig.appSecret) {
+    feishu = await imManager.connectUserFeishu(userId, feishuConfig, onNewChat, ignoreMessagesBefore);
+  }
+
+  if (telegramConfig && telegramConfig.enabled !== false && telegramConfig.botToken) {
+    telegram = await imManager.connectUserTelegram(userId, telegramConfig, onNewChat);
+  }
+
+  return { feishu, telegram };
+}
+
 async function main(): Promise<void> {
   validateConfig();
   initDatabase();
@@ -1401,11 +1493,8 @@ async function main(): Promise<void> {
     try { shutdownTerminals(); } catch (err) {
       logger.warn({ err }, 'Error shutting down terminals');
     }
-    try { await stopFeishu(); } catch (err) {
-      logger.warn({ err }, 'Error stopping Feishu');
-    }
-    try { await disconnectTelegram(); } catch (err) {
-      logger.warn({ err }, 'Error disconnecting Telegram');
+    try { await imManager.disconnectAll(); } catch (err) {
+      logger.warn({ err }, 'Error disconnecting IM connections');
     }
     try { await shutdownWebServer(); } catch (err) {
       logger.warn({ err }, 'Error shutting down web server');
@@ -1423,34 +1512,25 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  const doConnectFeishu = async (ignoreMessagesBefore?: number): Promise<boolean> => {
-    return connectFeishu({
-      onReady: () => {
-        logger.info('Feishu WebSocket connected');
-      },
-      onNewChat: (chatJid, chatName) => {
-        if (registeredGroups[chatJid]) return;
-        registerGroup(chatJid, {
-          name: chatName,
-          folder: MAIN_GROUP_FOLDER,
-          added_at: new Date().toISOString(),
-          executionMode: 'host',
-        });
-        logger.info({ chatJid, chatName }, 'Auto-registered Feishu chat to main session');
-      },
-      ignoreMessagesBefore,
-    });
-  };
-
+  // Reload Feishu connection for a specific user (hot-reload on config save)
   const reloadFeishuConnection = async (config: { appId: string; appSecret: string; enabled?: boolean }): Promise<boolean> => {
-    // 1. Stop existing connection
-    await stopFeishu();
+    // Find admin user's home folder (legacy global config routes to admin)
+    const adminUsers = listUsers({ status: 'active', role: 'admin', page: 1, pageSize: 1 }).users;
+    const adminUser = adminUsers[0];
+    if (!adminUser) {
+      logger.warn('No admin user found for Feishu reload');
+      return false;
+    }
+
+    // Disconnect existing admin Feishu connection
+    await imManager.disconnectUserFeishu(adminUser.id);
     if (feishuSyncInterval) { clearInterval(feishuSyncInterval); feishuSyncInterval = null; }
 
-    // 2. Reconnect if enabled and credentials present
-    //    Pass current timestamp so messages queued during disconnection are ignored
     if (config.enabled !== false && config.appId && config.appSecret) {
-      const connected = await doConnectFeishu(Date.now());
+      const homeGroup = getUserHomeGroup(adminUser.id);
+      const homeFolder = homeGroup?.folder || MAIN_GROUP_FOLDER;
+      const onNewChat = buildOnNewChat(adminUser.id, homeFolder);
+      const connected = await imManager.connectUserFeishu(adminUser.id, config, onNewChat, Date.now());
       if (connected) {
         syncGroupMetadata().catch((err) =>
           logger.error({ err }, 'Group sync after Feishu reconnect failed'),
@@ -1468,27 +1548,59 @@ async function main(): Promise<void> {
   };
 
   const reloadTelegramConnection = async (config: { botToken: string; enabled?: boolean }): Promise<boolean> => {
-    await disconnectTelegram();
+    // Find admin user
+    const adminUsers = listUsers({ status: 'active', role: 'admin', page: 1, pageSize: 1 }).users;
+    const adminUser = adminUsers[0];
+    if (!adminUser) {
+      logger.warn('No admin user found for Telegram reload');
+      return false;
+    }
+
+    await imManager.disconnectUserTelegram(adminUser.id);
+
     if (config.enabled !== false && config.botToken) {
-      await connectTelegram({
-        onReady: () => {
-          logger.info('Telegram bot connected');
-        },
-        onNewChat: (chatJid, chatName) => {
-          if (registeredGroups[chatJid]) return;
-          registerGroup(chatJid, {
-            name: chatName,
-            folder: MAIN_GROUP_FOLDER,
-            added_at: new Date().toISOString(),
-            executionMode: 'host',
-          });
-          logger.info({ chatJid, chatName }, 'Auto-registered Telegram chat to main session');
-        },
-      });
-      return isTelegramConnected();
+      const homeGroup = getUserHomeGroup(adminUser.id);
+      const homeFolder = homeGroup?.folder || MAIN_GROUP_FOLDER;
+      const onNewChat = buildOnNewChat(adminUser.id, homeFolder);
+      const connected = await imManager.connectUserTelegram(adminUser.id, config, onNewChat);
+      return connected;
     }
     logger.info('Telegram channel disabled via hot-reload');
     return false;
+  };
+
+  // Reload a per-user IM channel (hot-reload on user-im config save)
+  const reloadUserIMConfig = async (userId: string, channel: 'feishu' | 'telegram'): Promise<boolean> => {
+    const homeGroup = getUserHomeGroup(userId);
+    if (!homeGroup) {
+      logger.warn({ userId, channel }, 'No home group found for user IM reload');
+      return false;
+    }
+    const homeFolder = homeGroup.folder;
+    const onNewChat = buildOnNewChat(userId, homeFolder);
+    const ignoreMessagesBefore = Date.now();
+
+    if (channel === 'feishu') {
+      await imManager.disconnectUserFeishu(userId);
+      const config = getUserFeishuConfig(userId);
+      if (config && config.enabled !== false && config.appId && config.appSecret) {
+        const connected = await imManager.connectUserFeishu(userId, config, onNewChat, ignoreMessagesBefore);
+        logger.info({ userId, connected }, 'User Feishu connection hot-reloaded');
+        return connected;
+      }
+      logger.info({ userId }, 'User Feishu channel disabled via hot-reload');
+      return false;
+    } else {
+      await imManager.disconnectUserTelegram(userId);
+      const config = getUserTelegramConfig(userId);
+      if (config && config.enabled !== false && config.botToken) {
+        const connected = await imManager.connectUserTelegram(userId, config, onNewChat);
+        logger.info({ userId, connected }, 'User Telegram connection hot-reloaded');
+        return connected;
+      }
+      logger.info({ userId }, 'User Telegram channel disabled via hot-reload');
+      return false;
+    }
   };
 
   // Start Web server early so frontend auth/API isn't blocked by Feishu readiness.
@@ -1512,8 +1624,9 @@ async function main(): Promise<void> {
     },
     reloadFeishuConnection,
     reloadTelegramConnection,
-    isFeishuConnected: () => isFeishuConnected(),
-    isTelegramConnected: () => isTelegramConnected(),
+    reloadUserIMConfig,
+    isFeishuConnected: () => imManager.isAnyFeishuConnected(),
+    isTelegramConnected: () => imManager.isAnyTelegramConnected(),
   });
 
   // Clean expired sessions every hour
@@ -1561,18 +1674,77 @@ async function main(): Promise<void> {
   recoverPendingMessages();
   startMessageLoop();
 
-  // Feishu integration — check enabled flag before connecting
-  const feishuConfigResult = getFeishuProviderConfigWithSource();
-  const feishuEnabled = feishuConfigResult.config.enabled !== false;
+  // --- IM Connection Pool: connect per-user IM channels ---
+  // Load global IM config (backward compat: used for admin if no per-user config exists)
+  const globalFeishuConfig = getFeishuProviderConfigWithSource();
+  const globalTelegramConfig = getTelegramProviderConfigWithSource();
 
-  let feishuConnected = false;
-  if (!feishuEnabled) {
-    logger.info('Feishu channel disabled by user');
-  } else {
-    feishuConnected = await doConnectFeishu();
+  // Paginate through all active users (listUsers caps at 200 per page)
+  let allActiveUsers: typeof listUsers extends (...args: any) => { users: infer U } ? U : never = [];
+  {
+    let page = 1;
+    while (true) {
+      const result = listUsers({ status: 'active', page, pageSize: 200 });
+      allActiveUsers = allActiveUsers.concat(result.users);
+      if (allActiveUsers.length >= result.total) break;
+      page++;
+    }
   }
 
-  if (feishuConnected) {
+  // Register admin users for fallback IM routing
+  for (const user of allActiveUsers) {
+    if (user.role === 'admin') imManager.registerAdminUser(user.id);
+  }
+
+  let anyFeishuConnected = false;
+
+  for (const user of allActiveUsers) {
+    const homeGroup = getUserHomeGroup(user.id);
+    if (!homeGroup) continue;
+
+    // Per-user IM config takes precedence; fall back to global config for admin
+    const userFeishu = getUserFeishuConfig(user.id);
+    const userTelegram = getUserTelegramConfig(user.id);
+
+    // Determine effective Feishu config: per-user > global (admin only)
+    let effectiveFeishu: FeishuConnectConfig | null = null;
+    if (userFeishu && userFeishu.appId && userFeishu.appSecret) {
+      effectiveFeishu = { appId: userFeishu.appId, appSecret: userFeishu.appSecret, enabled: userFeishu.enabled };
+    } else if (user.role === 'admin' && globalFeishuConfig.source !== 'none') {
+      const gc = globalFeishuConfig.config;
+      effectiveFeishu = { appId: gc.appId, appSecret: gc.appSecret, enabled: gc.enabled };
+    }
+
+    // Determine effective Telegram config: per-user > global (admin only)
+    let effectiveTelegram: TelegramConnectConfig | null = null;
+    if (userTelegram && userTelegram.botToken) {
+      effectiveTelegram = { botToken: userTelegram.botToken, enabled: userTelegram.enabled };
+    } else if (user.role === 'admin' && globalTelegramConfig.source !== 'none') {
+      const gc = globalTelegramConfig.config;
+      effectiveTelegram = { botToken: gc.botToken, enabled: gc.enabled };
+    }
+
+    if (!effectiveFeishu && !effectiveTelegram) continue;
+
+    try {
+      const result = await connectUserIMChannels(
+        user.id,
+        homeGroup.folder,
+        effectiveFeishu,
+        effectiveTelegram,
+      );
+      if (result.feishu) anyFeishuConnected = true;
+      logger.info(
+        { userId: user.id, feishu: result.feishu, telegram: result.telegram },
+        'User IM channels connected',
+      );
+    } catch (err) {
+      logger.error({ userId: user.id, err }, 'Failed to connect user IM channels');
+    }
+  }
+
+  // Start Feishu group sync if any connection is active
+  if (anyFeishuConnected) {
     syncGroupMetadata().catch((err) =>
       logger.error({ err }, 'Initial group sync failed'),
     );
@@ -1581,20 +1753,10 @@ async function main(): Promise<void> {
         logger.error({ err }, 'Periodic group sync failed'),
       );
     }, GROUP_SYNC_INTERVAL_MS);
-  } else if (feishuEnabled) {
+  } else if (globalFeishuConfig.config.enabled !== false && globalFeishuConfig.source !== 'none') {
     logger.warn(
       'Feishu is not connected. Configure credentials in Settings to enable Feishu sync.',
     );
-  }
-
-  // Telegram integration — check enabled flag before connecting
-  const telegramConfig = getTelegramProviderConfigWithSource();
-  const telegramEnabled = telegramConfig.config.enabled !== false;
-
-  if (!telegramEnabled) {
-    logger.info('Telegram channel disabled by user');
-  } else {
-    await reloadTelegramConnection(telegramConfig.config);
   }
 }
 

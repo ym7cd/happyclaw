@@ -1,18 +1,22 @@
 import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { lazy, Suspense } from 'react';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { SetupPage } from './pages/SetupPage';
 import { SetupProvidersPage } from './pages/SetupProvidersPage';
-import { ChatPage } from './pages/ChatPage';
-import { TasksPage } from './pages/TasksPage';
-import { MonitorPage } from './pages/MonitorPage';
-import { SettingsPage } from './pages/SettingsPage';
+import { SetupChannelsPage } from './pages/SetupChannelsPage';
 import { MemoryPage } from './pages/MemoryPage';
 import { SkillsPage } from './pages/SkillsPage';
 import { UsersPage } from './pages/UsersPage';
 import { AuthGuard } from './components/auth/AuthGuard';
 import { AppLayout } from './components/layout/AppLayout';
 import { APP_BASE, shouldUseHashRouter } from './utils/url';
+
+// Lazy-load tab pages so AppLayout's SwipeablePages can code-split them
+const ChatPage = lazy(() => import('./pages/ChatPage').then(m => ({ default: m.ChatPage })));
+const TasksPage = lazy(() => import('./pages/TasksPage').then(m => ({ default: m.TasksPage })));
+const MonitorPage = lazy(() => import('./pages/MonitorPage').then(m => ({ default: m.MonitorPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 
 export function App() {
   const Router = shouldUseHashRouter() ? HashRouter : BrowserRouter;
@@ -32,6 +36,14 @@ export function App() {
             </AuthGuard>
           }
         />
+        <Route
+          path="/setup/channels"
+          element={
+            <AuthGuard>
+              <SetupChannelsPage />
+            </AuthGuard>
+          }
+        />
 
         {/* Protected Routes with Layout */}
         <Route
@@ -41,10 +53,10 @@ export function App() {
             </AuthGuard>
           }
         >
-          <Route path="/chat/:groupFolder?" element={<ChatPage />} />
+          <Route path="/chat/:groupFolder?" element={<Suspense fallback={null}><ChatPage /></Suspense>} />
           <Route path="/groups" element={<Navigate to="/settings?tab=groups" replace />} />
-          <Route path="/tasks" element={<TasksPage />} />
-          <Route path="/monitor" element={<MonitorPage />} />
+          <Route path="/tasks" element={<Suspense fallback={null}><TasksPage /></Suspense>} />
+          <Route path="/monitor" element={<Suspense fallback={null}><MonitorPage /></Suspense>} />
           <Route
             path="/memory"
             element={
@@ -54,7 +66,7 @@ export function App() {
             }
           />
           <Route path="/skills" element={<SkillsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings" element={<Suspense fallback={null}><SettingsPage /></Suspense>} />
           <Route
             path="/users"
             element={

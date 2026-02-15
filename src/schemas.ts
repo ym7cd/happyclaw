@@ -131,6 +131,7 @@ export const RegistrationConfigSchema = z.object({
 });
 
 export const AppearanceConfigSchema = z.object({
+  appName: z.string().max(32).optional(),
   aiName: z.string().min(1).max(32),
   aiAvatarEmoji: z.string().min(1).max(8),
   aiAvatarColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
@@ -146,6 +147,9 @@ export const ProfileUpdateSchema = z.object({
   display_name: z.string().max(64).optional(),
   avatar_emoji: z.string().max(8).nullable().optional(),
   avatar_color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+  ai_name: z.string().min(1).max(32).nullable().optional(),
+  ai_avatar_emoji: z.string().max(8).nullable().optional(),
+  ai_avatar_color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
 });
 
 export const PermissionValueSchema = z

@@ -85,7 +85,7 @@ export function RegisterPage() {
         return;
       }
       const mustChange = useAuthStore.getState().user?.must_change_password;
-      navigate(mustChange ? '/settings' : '/chat');
+      navigate(mustChange ? '/settings' : '/setup/channels');
     } catch (err) {
       setError(
         err instanceof Error

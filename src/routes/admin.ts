@@ -11,11 +11,9 @@ import {
   AdminPatchUserSchema,
   InviteCreateSchema,
 } from '../schemas.js';
-import { isUsernameConflictError } from './auth.js';
+import { isUsernameConflictError, toUserPublic } from './auth.js';
 import type {
   AuthUser,
-  User,
-  UserPublic,
   PermissionTemplateKey,
   AuthEventType,
 } from '../types.js';
@@ -58,28 +56,6 @@ const adminRoutes = new Hono<{ Variables: Variables }>();
 
 // ISO 8601 日期格式验证正则（审计日志查询 from/to 参数）
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
-
-// --- Helper function ---
-
-function toUserPublic(u: User): UserPublic {
-  return {
-    id: u.id,
-    username: u.username,
-    display_name: u.display_name,
-    role: u.role,
-    status: u.status,
-    permissions: u.permissions,
-    must_change_password: u.must_change_password,
-    disable_reason: u.disable_reason,
-    notes: u.notes,
-    avatar_emoji: u.avatar_emoji,
-    avatar_color: u.avatar_color,
-    created_at: u.created_at,
-    last_login_at: u.last_login_at,
-    last_active_at: null,
-    deleted_at: u.deleted_at,
-  };
-}
 
 // --- User Management ---
 

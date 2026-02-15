@@ -4,11 +4,11 @@
 
 ## 1. 项目定位
 
-HappyClaw 是一个自托管的个人 AI Agent 系统：
+HappyClaw 是一个自托管的多用户 AI Agent 系统：
 
-- **输入**：飞书消息（WebSocket 长连接）+ Web 界面聊天
-- **执行**：Docker 容器或宿主机进程中运行 Claude Agent（基于 Claude Agent SDK）
-- **输出**：飞书富文本卡片回复 + Web 实时流式推送
+- **输入**：飞书 / Telegram / Web 界面消息（每个用户可独立配置 IM 通道）
+- **执行**：Docker 容器或宿主机进程中运行 Claude Agent（基于 Claude Agent SDK），每个用户拥有独立主容器
+- **输出**：飞书富文本卡片 / Telegram HTML / Web 实时流式推送
 - **记忆**：Agent 自主维护 `CLAUDE.md` 和工作区文件，实现跨会话持久记忆
 
 ## 2. 核心架构
@@ -22,20 +22,22 @@ HappyClaw 是一个自托管的个人 AI Agent 系统：
 | `src/routes/auth.ts` | 认证：登录 / 登出 / 注册、`GET /api/auth/me`（含 `setupStatus`）、设置向导、RBAC、邀请码 |
 | `src/routes/groups.ts` | 群组 CRUD、消息分页、会话重置（重建工作区）、群组级容器环境变量 |
 | `src/routes/files.ts` | 文件上传（50MB 限制）/ 下载 / 删除、目录管理、路径遍历防护 |
-| `src/routes/config.ts` | Claude / 飞书配置（AES-256-GCM 加密存储）、连通性测试、批量应用到所有容器 |
+| `src/routes/config.ts` | Claude / 飞书配置（AES-256-GCM 加密存储）、连通性测试、批量应用到所有容器、per-user IM 通道配置（`/api/config/user-im/feishu`、`/api/config/user-im/telegram`） |
 | `src/routes/monitor.ts` | 系统状态：容器列表、队列状态、健康检查（`GET /api/health` 无需认证） |
 | `src/routes/memory.ts` | 记忆文件读写（`groups/global/` + `groups/{folder}/`）、全文检索 |
 | `src/routes/tasks.ts` | 定时任务 CRUD + 执行日志查询 |
 | `src/routes/skills.ts` | Skills 列表与管理 |
 | `src/routes/admin.ts` | 用户管理、邀请码、审计日志、注册设置 |
-| `src/feishu.ts` | 飞书集成：WebSocket 长连接、消息去重（LRU 1000 条 / 30min TTL）、富文本卡片、Reaction、自动注册回调 |
-| `src/container-runner.ts` | 容器生命周期：Docker run + 宿主机进程模式、卷挂载构建、环境变量注入、OUTPUT_MARKER 流式输出解析 |
+| `src/feishu.ts` | 飞书连接工厂（`createFeishuConnection`）：WebSocket 长连接、消息去重（LRU 1000 条 / 30min TTL）、富文本卡片、Reaction |
+| `src/telegram.ts` | Telegram 连接工厂（`createTelegramConnection`）：Bot API Long Polling、Markdown → HTML 转换、长消息分片（3800 字符） |
+| `src/im-manager.ts` | IM 连接池管理器（`IMConnectionManager`）：per-user 飞书/Telegram 连接管理、热重连、批量断开 |
+| `src/container-runner.ts` | 容器生命周期：Docker run + 宿主机进程模式、卷挂载构建（isAdminHome 区分权限）、环境变量注入、OUTPUT_MARKER 流式输出解析 |
 | `src/group-queue.ts` | 并发控制：最大 20 容器 + 最大 5 宿主机进程、会话级队列、任务优先于消息、指数退避重试 |
 | `src/runtime-config.ts` | 配置存储：AES-256-GCM 加密、分层配置（容器级 > 全局 > 环境变量）、变更审计日志 |
 | `src/task-scheduler.ts` | 定时调度：60s 轮询、cron / interval / once 三种模式、group / isolated 上下文 |
 | `src/file-manager.ts` | 文件安全：路径遍历防护、符号链接检测、系统路径保护（`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`） |
 | `src/mount-security.ts` | 挂载安全：白名单校验、黑名单模式匹配（`.ssh`、`.gnupg` 等）、非主会话只读强制 |
-| `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v10）、核心表定义 |
+| `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v13）、核心表定义 |
 | `src/config.ts` | 常量：路径、超时、并发限制、会话密钥（优先级：环境变量 > 文件 > 生成，0600 权限） |
 | `src/logger.ts` | 日志：pino + pino-pretty |
 
@@ -57,6 +59,7 @@ HappyClaw 是一个自托管的个人 AI Agent 系统：
 |------|------|------|
 | `/setup` | `SetupPage` — 管理员创建向导 | 公开（仅未初始化时） |
 | `/setup/providers` | `SetupProvidersPage` — Claude/飞书配置 | 登录后 |
+| `/setup/channels` | `SetupChannelsPage` — 用户 IM 通道配置引导 | 登录后（注册后跳转） |
 | `/login` | `LoginPage` | 公开 |
 | `/register` | `RegisterPage` | 公开（可通过设置关闭） |
 | `/chat/:groupFolder?` | `ChatPage` — 主聊天界面 | 登录后 |
@@ -73,12 +76,12 @@ HappyClaw 是一个自托管的个人 AI Agent 系统：
 
 Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程中执行：
 
-- **输入协议**：stdin 接收初始 JSON（`ContainerInput`：prompt、sessionId、groupFolder、chatJid、isMain），IPC 文件接收后续消息
+- **输入协议**：stdin 接收初始 JSON（`ContainerInput`：prompt、sessionId、groupFolder、chatJid、isHome、isAdminHome），IPC 文件接收后续消息
 - **输出协议**：stdout 输出 `OUTPUT_START_MARKER...OUTPUT_END_MARKER` 包裹的 JSON（`ContainerOutput`：status、result、newSessionId、streamEvent）
 - **流式事件**：`text_delta`、`thinking_delta`、`tool_use_start/end`、`tool_progress`、`hook_started/progress/response`、`status`、`init` —— 通过 WebSocket `stream_event` 消息广播到 Web 端
 - **文本缓冲**：`text_delta` 累积到 200 字符后刷新，避免高频小包
 - **会话循环**：`query()` → 等待 IPC 消息 → 再次 `query()` → 直到 `_close` sentinel
-- **MCP Server**：7 个工具（`send_message`、`schedule_task`、`list/pause/resume/cancel_task`、`register_group`）
+- **MCP Server**：10 个工具（`send_message`、`schedule_task`、`list/pause/resume/cancel_task`、`register_group`、`memory_append`、`memory_search`、`memory_get`）
 - **Hooks**：PreCompact 钩子在上下文压缩前归档对话到 `conversations/` 目录
 - **敏感数据过滤**：StreamEvent 中的 `toolInputSummary` 会过滤 `ANTHROPIC_API_KEY` 等环境变量名
 
@@ -86,12 +89,14 @@ Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程�
 
 每个注册群组可选择执行模式（`RegisteredGroup.executionMode`）：
 
-| 模式 | 行为 | 前置依赖 |
-|------|------|---------|
-| `host` | Agent 作为宿主机进程运行，通过 `claude` CLI 直接访问宿主机文件系统 | Claude Agent SDK（自动安装） |
-| `container` | Agent 在 Docker 容器中运行，通过卷挂载访问文件，完全隔离 | Docker Desktop + 构建镜像 |
+| 模式 | 行为 | 适用对象 | 前置依赖 |
+|------|------|---------|---------|
+| `host` | Agent 作为宿主机进程运行，通过 `claude` CLI 直接访问宿主机文件系统 | admin 主容器（`folder=main`） | Claude Agent SDK（自动安装） |
+| `container` | Agent 在 Docker 容器中运行，通过卷挂载访问文件，完全隔离 | member 主容器（`folder=home-{userId}`）及其他群组 | Docker Desktop + 构建镜像 |
 
-**注意**：主会话（`folder === main`）在 `loadState()` 中会被自动设为 `host` 模式。宿主机模式通过 `node container/agent-runner/dist/index.js` 启动 agent-runner 进程，agent-runner 内部调用 `@anthropic-ai/claude-agent-sdk`，SDK 内置了完整的 Claude Code CLI 运行时（`cli.js`），无需全局安装。
+**is_home 模型**：每个用户在注册时自动创建一个 `is_home=true` 的主容器。`loadState()` 启动时强制执行模式：admin 的主容器（`folder=main`）设为 `host`，member 的主容器（`folder=home-{userId}`）设为 `container`。
+
+宿主机模式通过 `node container/agent-runner/dist/index.js` 启动 agent-runner 进程，agent-runner 内部调用 `@anthropic-ai/claude-agent-sdk`，SDK 内置了完整的 Claude Code CLI 运行时（`cli.js`），无需全局安装。
 
 宿主机模式支持 `customCwd` 自定义工作目录，使用 `MAX_CONCURRENT_HOST_PROCESSES`（默认 5）作为独立的并发限制。
 
@@ -111,14 +116,14 @@ Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程�
 ### 3.1 消息处理
 
 ```
-飞书/Web 消息 → storeMessageDirect(db) + broadcastNewMessage(ws)
+飞书/Telegram/Web 消息 → storeMessageDirect(db) + broadcastNewMessage(ws)
      → index.ts 轮询 getNewMessages()（2s 间隔）→ 按 chat_jid 分组去重
      → queue.enqueueMessageCheck() 判断容器/进程状态
          ├── 空闲 → runContainerAgent() 启动容器/进程
          ├── 运行中 → queue.sendMessage() 通过 IPC 文件注入
          └── 满载 → waitingGroups 排队等待
      → 流式输出 → onOutput 回调
-         → sendFeishuMessage() + broadcastToWebClients() + db.storeMessageDirect()
+         → imManager.sendFeishuMessage()/sendTelegramMessage() + broadcastToWebClients() + db.storeMessageDirect()
 ```
 
 ### 3.2 流式显示管道
@@ -149,15 +154,15 @@ StreamEvent 类型在三处定义，**必须保持同步**：
 
 ### 3.4 容器挂载策略
 
-| 资源 | 容器路径 | 主会话 | 其他会话 |
-|------|---------|--------|---------|
+| 资源 | 容器路径 | admin 主容器 | member 主容器/其他 |
+|------|---------|-------------|-------------------|
 | 工作目录 `groups/{folder}/` | `/workspace/group` | 读写 | 读写（仅自己） |
 | 项目根目录 | `/workspace/project` | 读写 | 不可访问 |
 | 全局记忆 `groups/global/` | `/workspace/global` | 读写 | 只读 |
 | Claude 会话 `data/sessions/{folder}/.claude/` | `/home/node/.claude` | 读写 | 读写（仅自己） |
 | IPC 通道 `data/ipc/{folder}/` | `/workspace/ipc` | 读写 | 读写（仅自己） |
 | 项目级 Skills `container/skills/` | `/workspace/project-skills` | 只读 | 只读 |
-| 用户级 Skills `~/.claude/skills/` | `/workspace/user-skills` | 只读 | 只读 |
+| 用户级 Skills `~/.claude/skills/` | `/workspace/user-skills` | 只读 | admin 创建的会话可读 |
 | 环境变量 `data/env/{folder}/env` | `/workspace/env-dir/env` | 只读 | 只读 |
 | 额外挂载（白名单内） | `/workspace/extra/{name}` | 按白名单 | 按白名单（`nonMainReadOnly` 时强制只读） |
 
@@ -190,6 +195,18 @@ StreamEvent 类型在三处定义，**必须保持同步**：
 |------|------|
 | `send_message` | 发送消息（含 `chatJid`、`content`） |
 
+### 3.7 IM 连接池架构
+
+`IMConnectionManager`（`src/im-manager.ts`）管理 per-user 的 IM 连接：
+
+- 每个用户可独立配置飞书和 Telegram 连接（存储在 `data/config/user-im/{userId}/feishu.json` 和 `telegram.json`）
+- `feishu.ts` 和 `telegram.ts` 改为工厂模式（`createFeishuConnection()`、`createTelegramConnection()`），返回无状态的连接实例
+- 系统启动时 `loadState()` 遍历所有用户，加载已保存的 IM 配置并建立连接
+- 管理员的系统级飞书/Telegram 配置（`data/config/feishu-provider.json`）绑定到 admin 用户的连接
+- 收到 IM 消息时，通过 `onNewChat` 回调自动注册到该用户的主容器（`home-{userId}`）
+- 支持热重连（`ignoreMessagesBefore` 过滤渠道关闭期间的堆积消息）
+- 优雅关闭时 `disconnectAll()` 批量断开所有连接
+
 ## 4. 认证与授权
 
 ### 4.1 认证机制
@@ -220,9 +237,26 @@ StreamEvent 类型在三处定义，**必须保持同步**：
 
 完整的审计事件类型（`AuthEventType`）：`login_success`、`login_failed`、`logout`、`password_changed`、`profile_updated`、`user_created`、`user_disabled`、`user_enabled`、`user_deleted`、`user_restored`、`user_updated`、`role_changed`、`session_revoked`、`invite_created`、`invite_deleted`、`invite_used`、`recovery_reset`、`register_success`
 
+### 4.4 用户隔离
+
+每个用户拥有独立的资源空间：
+
+| 资源 | admin | member |
+|------|-------|--------|
+| 主容器 folder | `main` | `home-{userId}` |
+| 执行模式 | `host`（宿主机） | `container`（Docker） |
+| IM 通道 | 独立的飞书/Telegram 连接 | 独立的飞书/Telegram 连接 |
+| 全局记忆写入 | 可读写 | 只读 |
+| 项目根目录挂载 | 读写 | 不可访问 |
+| 跨组 MCP 操作 | `register_group`、跨组任务管理 | 仅限自己的群组 |
+| AI 外观 | 可自定义 `ai_name`、`ai_avatar_emoji`、`ai_avatar_color` | 同左 |
+| Web 终端 | 可访问自己的容器终端 | 可访问自己的容器终端 |
+
+用户注册后自动创建主容器（`POST /api/auth/register` → `ensureUserHomeGroup()`）。
+
 ## 5. 数据库表
 
-SQLite WAL 模式，Schema 经历 v1→v10 演进（`db.ts` 中的 `EXPECTED_SCHEMA_VERSION`）。
+SQLite WAL 模式，Schema 经历 v1→v13 演进（`db.ts` 中的 `SCHEMA_VERSION`）。
 
 | 表 | 主键 | 用途 |
 |-----|------|------|
@@ -230,15 +264,15 @@ SQLite WAL 模式，Schema 经历 v1→v10 演进（`db.ts` 中的 `EXPECTED_SCH
 | `messages` | `(id, chat_jid)` | 消息历史（含 `is_from_me`、`source` 标识来源） |
 | `scheduled_tasks` | `id` | 定时任务（调度类型、上下文模式、状态） |
 | `task_run_logs` | `id` (auto) | 任务执行日志（耗时、状态、结果） |
-| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`） |
+| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`） |
 | `sessions` | `group_folder` | 会话 ID 映射（Claude session 持久化） |
 | `router_state` | `key` | KV 存储（`last_timestamp`、`last_agent_timestamp`） |
-| `users` | `id` | 用户账户（密码哈希、角色、权限、状态） |
+| `users` | `id` | 用户账户（密码哈希、角色、权限、状态、`ai_name`、`ai_avatar_emoji`、`ai_avatar_color`） |
 | `user_sessions` | `id` | 登录会话（token、过期时间、最后活跃） |
 | `invite_codes` | `code` | 注册邀请码（最大使用次数、过期时间） |
 | `auth_audit_log` | `id` (auto) | 认证审计日志 |
 
-**注意**：`registered_groups.folder` 允许重复（多个飞书群组可映射到同一 folder）。
+**注意**：`registered_groups.folder` 允许重复（多个飞书群组可映射到同一 folder）。`registered_groups.is_home` 标记用户主容器。
 
 ## 6. 目录约定
 
@@ -260,6 +294,8 @@ data/config/claude-provider.json     # Claude API 配置
 data/config/feishu-provider.json     # 飞书配置
 data/config/claude-custom-env.json   # 自定义环境变量
 data/config/container-env/{folder}.json  # 群组级环境变量覆盖
+data/config/user-im/{userId}/feishu.json    # 用户级飞书 IM 配置（AES-256-GCM 加密）
+data/config/user-im/{userId}/telegram.json  # 用户级 Telegram IM 配置（AES-256-GCM 加密）
 data/config/registration.json    # 注册设置（开关、邀请码要求）
 data/config/session-secret.key   # 会话签名密钥（0600 权限）
 
@@ -302,6 +338,11 @@ container/skills/             # 项目级 Skills（挂载到所有容器）
 - `GET|PUT /api/config/claude/custom-env`
 - `POST /api/config/claude/test`（连通性测试） · `POST /api/config/claude/apply`（应用到所有容器）
 - `GET|PUT /api/config/feishu`
+- `GET|PUT /api/config/telegram` · `POST /api/config/telegram/test`（系统级 Telegram 配置）
+- `GET|PUT /api/config/appearance` · `GET /api/config/appearance/public`（外观配置，public 端点无需认证）
+- `GET|PUT /api/config/user-im/feishu`（用户级飞书 IM 配置，每个用户独立）
+- `GET|PUT /api/config/user-im/telegram`（用户级 Telegram IM 配置）
+- `POST /api/config/user-im/telegram/test`（Telegram Bot Token 连通性测试）
 
 ### 任务
 - `GET /api/tasks` · `POST /api/tasks` · `PATCH /api/tasks/:id` · `DELETE /api/tasks/:id`
@@ -326,11 +367,13 @@ container/skills/             # 项目级 Skills（挂载到所有容器）
 
 首次启动时，`GET /api/auth/status` 返回 `initialized: false`（无任何用户）。前端 `AuthGuard` 检测到未初始化状态后重定向到 `/setup`，引导创建管理员账号（自定义用户名 + 密码，调用 `POST /api/auth/setup`）。创建后自动登录并跳转到 `/setup/providers` 完成 Claude API 和飞书配置。
 
+新用户注册后跳转到 `/setup/channels` 引导配置个人 IM 通道（飞书/Telegram），可跳过直接使用 Web 聊天。
+
 不存在默认账号。`POST /api/auth/setup` 仅在用户表为空时可用。
 
-### 8.2 飞书自动注册
+### 8.2 IM 自动注册
 
-未注册的飞书群组首次发消息时，通过 `onNewChat` 回调自动注册到主会话（`folder='main'`）。支持多个飞书群组映射到同一个 folder。
+未注册的飞书/Telegram 群组首次发消息时，通过 `onNewChat` 回调自动注册到该用户的主容器（`folder='home-{userId}'`，admin 则为 `folder='main'`）。支持多个 IM 群组映射到同一个 folder。
 
 ### 8.3 无触发词
 
@@ -340,17 +383,24 @@ container/skills/             # 项目级 Skills（挂载到所有容器）
 
 每个会话拥有独立的 `groups/{folder}` 工作目录、`data/sessions/{folder}/.claude` 会话目录、`data/ipc/{folder}` IPC 命名空间。非主会话只能发消息给自己所在的群组。
 
-### 8.5 主会话特权
+### 8.5 主容器权限层级
 
-主会话（`folder === main`）拥有额外权限：
+每个用户的主容器（`is_home=true`）拥有基础权限，admin 主容器额外拥有特权：
+
+**所有主容器（isHome=true）**：
+- 记忆回忆能力（`memory_search`、`memory_get`、`memory_append`）
+- 自己群组的 IPC 消息发送
+
+**admin 主容器（isAdminHome=true，`folder=main`）额外权限**：
 - 挂载项目根目录（读写）
 - 全局记忆读写（其他会话只读）
-- 跨会话操作（`register_group`、`refresh_groups` MCP 工具）
+- 跨会话操作（`register_group` MCP 工具）
 - IPC 消息可发送到任意群组
+- 跨组任务管理（暂停/恢复/取消其他群组的任务）
 
 ### 8.6 回复路由
 
-主会话在 Web 与飞书共用历史（通过 `normalizeMainJid` 映射飞书 JID → `web:main`）。飞书来源的消息回复到飞书，Web 来源的消息仅在 Web 展示。
+主容器在 Web 与 IM 共用历史（通过 `normalizeHomeJid` 映射飞书/Telegram JID → `web:{folder}`）。IM 来源的消息回复到对应 IM 渠道，Web 来源的消息仅在 Web 展示。
 
 ### 8.7 并发控制
 
@@ -364,6 +414,30 @@ container/skills/             # 项目级 Skills（挂载到所有容器）
 ### 8.8 .env 加载器
 
 `src/index.ts` 顶部（所有 import 之前）包含手动 `.env` 加载器，支持 `export` 前缀和 `#` 注释。替代 Node.js `--env-file` 标志，确保环境变量在模块初始化之前可用。
+
+### 8.9 Per-user 主容器自动创建
+
+用户注册时（`POST /api/auth/register`）自动调用 `ensureUserHomeGroup()` 创建主容器：
+- admin：folder=`main`，执行模式=`host`
+- member：folder=`home-{userId}`，执行模式=`container`
+- 同时创建 `web:{folder}` 的 chat 记录和 `registered_groups` 记录（`is_home=1`）
+
+### 8.10 Per-user AI 外观
+
+用户可通过 `PUT /api/auth/profile` 自定义 AI 外观：
+- `ai_name`：AI 助手名称（默认使用系统 `ASSISTANT_NAME`）
+- `ai_avatar_emoji`：头像 emoji（如 `🐱`、`🤖`）
+- `ai_avatar_color`：头像背景色（CSS 颜色值）
+
+前端 `MessageBubble` 组件根据消息来源的群组 owner 显示对应的 AI 外观。
+
+### 8.11 IM 通道热管理
+
+通过 `PUT /api/config/user-im/feishu` 或 `PUT /api/config/user-im/telegram` 更新 IM 配置后：
+- 保存配置到 `data/config/user-im/{userId}/` 目录（AES-256-GCM 加密）
+- 断开该用户的旧连接
+- 如果新配置有效（`enabled=true` 且凭据非空），立即建立新连接
+- `ignoreMessagesBefore` 设为当前时间戳，避免处理堆积消息
 
 ## 9. 环境变量
 
@@ -460,8 +534,16 @@ make reset-init    # 重置为首装状态（清空数据库和配置，用于�
 3. `web/src/stores/chat.ts` — 添加 `handleStreamEvent()` 处理分支
 4. 三处必须同步更新
 
+### 新增 IM 集成渠道
+
+1. 在 `src/` 目录下创建新的连接工厂模块（参考 `feishu.ts` 和 `telegram.ts` 的接口模式）
+2. 在 `src/im-manager.ts` 中添加 `connectUser{Channel}()` / `disconnectUser{Channel}()` 方法
+3. 在 `src/routes/config.ts` 中添加 `/api/config/user-im/{channel}` 路由（GET/PUT）
+4. 在 `src/index.ts` 的 `loadState()` 和 `connectUserIMChannels()` 中加载新渠道
+5. 前端 `SetupChannelsPage` 和设置页添加新渠道的配置表单
+
 ### 修改数据库 Schema
 
 1. 在 `src/db.ts` 中增加 migration 语句
-2. 更新 `EXPECTED_SCHEMA_VERSION` 常量
+2. 更新 `SCHEMA_VERSION` 常量
 3. 同时更新 `CREATE TABLE` 语句和 migration ALTER/CREATE 语句

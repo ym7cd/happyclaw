@@ -24,9 +24,13 @@ export interface UserPublic {
   deleted_at: string | null;
   avatar_emoji: string | null;
   avatar_color: string | null;
+  ai_name: string | null;
+  ai_avatar_emoji: string | null;
+  ai_avatar_color: string | null;
 }
 
 export interface AppearanceConfig {
+  appName: string;
   aiName: string;
   aiAvatarEmoji: string;
   aiAvatarColor: string;
@@ -52,7 +56,7 @@ interface AuthState {
   checkStatus: () => Promise<void>;
   setupAdmin: (username: string, password: string) => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
-  updateProfile: (payload: { username?: string; display_name?: string; avatar_emoji?: string | null; avatar_color?: string | null }) => Promise<void>;
+  updateProfile: (payload: { username?: string; display_name?: string; avatar_emoji?: string | null; avatar_color?: string | null; ai_name?: string | null; ai_avatar_emoji?: string | null; ai_avatar_color?: string | null }) => Promise<void>;
   fetchAppearance: () => Promise<void>;
   hasPermission: (permission: Permission) => boolean;
 }

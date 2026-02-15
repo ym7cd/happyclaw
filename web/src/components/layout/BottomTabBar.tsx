@@ -1,9 +1,9 @@
 import { NavLink, useLocation } from 'react-router-dom';
-import { MessageSquare, Layers, Clock, Activity, Settings } from 'lucide-react';
+import { MessageSquare, Clock, Activity, Settings } from 'lucide-react';
+import { useScrollDirection } from '../../hooks/useScrollDirection';
 
-const navItems = [
+export const navItems = [
   { path: '/chat', icon: MessageSquare, label: '工作台' },
-  { path: '/groups', icon: Layers, label: '会话' },
   { path: '/tasks', icon: Clock, label: '任务' },
   { path: '/monitor', icon: Activity, label: '监控' },
   { path: '/settings', icon: Settings, label: '设置' },
@@ -11,14 +11,13 @@ const navItems = [
 
 export function BottomTabBar() {
   const location = useLocation();
+  const scrollDir = useScrollDirection();
+  const isCompact = scrollDir === 'down';
 
   return (
     <>
-      {/* iOS PWA 底部触摸吸收层 */}
       <div className="pwa-bottom-guard" aria-hidden="true" />
-
-      {/* 悬浮胶囊导航 */}
-      <div className="floating-nav-container">
+      <div className={`floating-nav-container ${isCompact ? 'compact' : ''}`}>
         <nav className="floating-nav">
           {navItems.map(({ path, icon: Icon, label }) => {
             const isActive = location.pathname.startsWith(path);

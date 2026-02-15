@@ -23,6 +23,7 @@ import {
   registerUserWithInvite,
   registerUserWithoutInvite,
   logAuthEvent,
+  ensureUserHomeGroup,
 } from '../db.js';
 import {
   getRegistrationConfig,
@@ -42,7 +43,8 @@ import {
   validatePassword,
   generateUserId,
 } from '../auth.js';
-import type { AuthUser, UserPublic } from '../types.js';
+import type { AuthUser, User, UserPublic } from '../types.js';
+import { logger } from '../logger.js';
 import { lastActiveCache } from '../web-context.js';
 import { MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_MINUTES, SESSION_COOKIE_NAME } from '../config.js';
 
@@ -67,7 +69,7 @@ export function isUsernameConflictError(err: unknown): boolean {
   );
 }
 
-function toUserPublic(u: any): UserPublic {
+export function toUserPublic(u: User): UserPublic {
   return {
     id: u.id,
     username: u.username,
@@ -80,6 +82,9 @@ function toUserPublic(u: any): UserPublic {
     notes: u.notes,
     avatar_emoji: u.avatar_emoji ?? null,
     avatar_color: u.avatar_color ?? null,
+    ai_name: u.ai_name ?? null,
+    ai_avatar_emoji: u.ai_avatar_emoji ?? null,
+    ai_avatar_color: u.ai_avatar_color ?? null,
     created_at: u.created_at,
     last_login_at: u.last_login_at,
     last_active_at: null,
@@ -160,6 +165,13 @@ authRoutes.post('/setup', async (c) => {
     user_agent: ua,
     details: { source: 'setup_wizard', role: 'admin' },
   });
+
+  // Create admin home group (web:main, folder=main, host mode)
+  try {
+    ensureUserHomeGroup(userId, 'admin', username);
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to create admin home group during setup');
+  }
 
   // Auto-login
   const token = generateSessionToken();
@@ -274,6 +286,15 @@ authRoutes.post('/login', async (c) => {
 
   clearLoginAttempts(username, ip);
   updateUserFields(user.id, { last_login_at: now });
+
+  // Ensure user has a home group (backfill for existing users)
+  try {
+    ensureUserHomeGroup(user.id, user.role, user.username);
+  } catch (err) {
+    // Don't block login if home group creation fails
+    logger.warn({ err, userId: user.id }, 'Failed to ensure home group during login');
+  }
+
   logAuthEvent({
     event_type: 'login_success',
     username,
@@ -418,6 +439,13 @@ authRoutes.post('/register', async (c) => {
     details: { role: result.role, with_invite: withInvite },
   });
 
+  // Create home group for new user
+  try {
+    ensureUserHomeGroup(userId, result.role, username);
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to create home group during registration');
+  }
+
   // Auto-login
   const token = generateSessionToken();
   createUserSession({
@@ -517,6 +545,15 @@ authRoutes.put('/profile', authMiddleware, async (c) => {
   }
   if (validation.data.avatar_color !== undefined) {
     updates.avatar_color = validation.data.avatar_color;
+  }
+  if (validation.data.ai_name !== undefined) {
+    updates.ai_name = validation.data.ai_name;
+  }
+  if (validation.data.ai_avatar_emoji !== undefined) {
+    updates.ai_avatar_emoji = validation.data.ai_avatar_emoji;
+  }
+  if (validation.data.ai_avatar_color !== undefined) {
+    updates.ai_avatar_color = validation.data.ai_avatar_color;
   }
   if (Object.keys(updates).length === 0) {
     return c.json({ error: 'No fields to update' }, 400);

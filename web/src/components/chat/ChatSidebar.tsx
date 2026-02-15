@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
+import { useAuthStore } from '../../stores/auth';
 import { Button } from '@/components/ui/button';
 import { SearchInput } from '@/components/common';
 import { ConfirmDialog } from '@/components/common';
@@ -45,14 +46,14 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
     loadGroups();
   }, [loadGroups]);
 
-  // Separate main group from others, sort by time
+  // Separate home group from others, sort by time
   const { mainGroup, otherGroups } = useMemo(() => {
     let main: (typeof groups)[string] & { jid: string } | null = null;
     const others: ((typeof groups)[string] & { jid: string })[] = [];
 
     for (const [jid, info] of Object.entries(groups)) {
       const entry = { jid, ...info };
-      if (info.folder === 'main') {
+      if (info.is_home) {
         main = entry;
       } else {
         others.push(entry);
@@ -99,6 +100,9 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
     navigate(`/chat/${folder}`);
   };
 
+  const appearance = useAuthStore((s) => s.appearance);
+  const appName = appearance?.appName || 'HappyClaw';
+
   const handleCreated = (jid: string, folder: string) => {
     selectGroup(jid);
     navigate(`/chat/${folder}`);
@@ -109,13 +113,10 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
     try {
       await deleteFlow(deleteState.jid);
       setDeleteState({ open: false, jid: '', name: '' });
-      const mainEntry = Object.entries(useChatStore.getState().groups).find(([, g]) => g.folder === 'main');
-      if (mainEntry) {
-        selectGroup(mainEntry[0]);
-        navigate(`/chat/${mainEntry[1].folder}`);
-      } else {
-        navigate('/chat');
-      }
+      // Navigate to the auto-selected next group, or list view if none remain
+      const nextJid = useChatStore.getState().currentGroup;
+      const nextFolder = nextJid ? useChatStore.getState().groups[nextJid]?.folder : null;
+      navigate(nextFolder ? `/chat/${nextFolder}` : '/chat');
     } finally {
       setDeleteLoading(false);
     }
@@ -135,6 +136,16 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
 
   return (
     <div className={cn('flex flex-col h-full bg-background border-r', className)}>
+      {/* Logo Header — only on mobile (PC has NavRail logo) */}
+      <div className="flex items-center gap-2.5 px-4 pt-4 pb-1 lg:hidden">
+        <img
+          src={`${import.meta.env.BASE_URL}icons/icon-192.png`}
+          alt={appName}
+          className="w-8 h-8 rounded-lg"
+        />
+        <span className="text-lg font-bold text-slate-900 truncate">{appName}</span>
+      </div>
+
       {/* New Chat + Search */}
       <div className="p-3 space-y-2">
         <Button
@@ -150,6 +161,7 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
           onChange={setSearchQuery}
           placeholder="搜索容器..."
           debounce={200}
+          className="max-lg:bg-white/50 max-lg:backdrop-blur-lg max-lg:border-white/30 max-lg:rounded-lg"
         />
       </div>
 
@@ -159,7 +171,7 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
           <SkeletonCardList count={6} compact />
         ) : (
           <>
-            {/* Pinned: Main container */}
+            {/* Pinned: Home container */}
             {mainGroup && (
               <div className="mb-2">
                 <ChatGroupItem
@@ -169,7 +181,7 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
                   lastMessage={mainGroup.lastMessage}
                   executionMode={mainGroup.execution_mode}
                   isActive={currentGroup === mainGroup.jid}
-                  isMain
+                  isHome
                   onSelect={handleGroupSelect}
                   onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
                 />
@@ -201,7 +213,7 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
                       lastMessage={g.lastMessage}
                       executionMode={g.execution_mode}
                       isActive={currentGroup === g.jid}
-                      isMain={false}
+                      isHome={false}
                       editable={g.editable}
                       deletable={g.deletable}
                       onSelect={handleGroupSelect}

@@ -287,7 +287,7 @@ export function MessageInput({
 
   return (
     <div
-      className="px-4 pt-2 pb-6 bg-background ios-pwa-bottom-safe"
+      className="px-4 pt-2 pb-6 bg-background ios-pwa-bottom-safe max-lg:bg-white/60 max-lg:backdrop-blur-xl max-lg:saturate-[1.8] max-lg:border-t max-lg:border-white/20"
       style={{ paddingBottom: `max(1.5rem, var(--keyboard-height, 0px))` }}
     >
       <div className="max-w-3xl mx-auto">
@@ -479,9 +479,9 @@ export function MessageInput({
             <button
               onClick={handleSend}
               disabled={!canSend || disabled}
-              className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
+              className={`w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer active:scale-90 ${
                 canSend && !disabled
-                  ? 'bg-primary text-white hover:bg-primary/90'
+                  ? 'bg-primary text-white hover:bg-primary/90 max-lg:shadow-[0_2px_8px_rgba(13,148,136,0.3)]'
                   : 'bg-slate-100 text-slate-400'
               }`}
             >

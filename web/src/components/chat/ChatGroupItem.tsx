@@ -6,6 +6,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
+import { useAuthStore } from '../../stores/auth';
 
 export interface ChatGroupItemProps {
   jid: string;
@@ -14,7 +15,7 @@ export interface ChatGroupItemProps {
   lastMessage?: string;
   executionMode?: 'container' | 'host';
   isActive: boolean;
-  isMain: boolean;
+  isHome: boolean;
   editable?: boolean;
   deletable?: boolean;
   onSelect: (jid: string, folder: string) => void;
@@ -30,7 +31,7 @@ export function ChatGroupItem({
   lastMessage,
   executionMode,
   isActive,
-  isMain,
+  isHome,
   editable,
   deletable,
   onSelect,
@@ -38,7 +39,10 @@ export function ChatGroupItem({
   onClearHistory,
   onDelete,
 }: ChatGroupItemProps) {
-  const displayName = isMain ? '主容器' : name;
+  const currentUser = useAuthStore((s) => s.user);
+  const displayName = isHome
+    ? (currentUser?.role === 'admin' ? '主容器' : '我的工作区')
+    : name;
   const truncatedMsg =
     lastMessage && lastMessage.length > 40
       ? lastMessage.substring(0, 40) + '...'
@@ -48,7 +52,9 @@ export function ChatGroupItem({
     <div
       className={cn(
         'group relative rounded-lg mb-0.5 transition-colors',
-        isActive ? 'bg-accent' : 'hover:bg-accent/50',
+        isActive
+          ? 'bg-accent max-lg:bg-white/55 max-lg:backdrop-blur-lg max-lg:saturate-[1.8] max-lg:border max-lg:border-white/35 max-lg:shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_1px_rgba(255,255,255,0.6)]'
+          : 'hover:bg-accent/50',
       )}
     >
       <button
@@ -56,7 +62,7 @@ export function ChatGroupItem({
         className="w-full text-left px-3 pr-12 py-2.5 cursor-pointer"
       >
         <div className="flex items-center gap-1.5">
-          {isMain && (
+          {isHome && (
             <Star className="w-3.5 h-3.5 text-yellow-500 fill-yellow-500 flex-shrink-0" />
           )}
           <span
@@ -74,7 +80,7 @@ export function ChatGroupItem({
           )}
         </div>
         {truncatedMsg && (
-          <p className={cn('text-xs text-muted-foreground/70 truncate mt-0.5', isMain && 'pl-5')}>
+          <p className={cn('text-xs text-muted-foreground/70 truncate mt-0.5', isHome && 'pl-5')}>
             {truncatedMsg}
           </p>
         )}
@@ -97,7 +103,7 @@ export function ChatGroupItem({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-40">
-            {!isMain && editable && onRename && (
+            {!isHome && editable && onRename && (
               <DropdownMenuItem onClick={() => onRename(jid, name)}>
                 <Pencil className="w-4 h-4" />
                 重命名
@@ -110,7 +116,7 @@ export function ChatGroupItem({
               <RotateCcw className="w-4 h-4" />
               重建工作区
             </DropdownMenuItem>
-            {!isMain && deletable && onDelete && (
+            {!isHome && deletable && onDelete && (
               <DropdownMenuItem
                 variant="destructive"
                 onClick={() => onDelete(jid, name)}

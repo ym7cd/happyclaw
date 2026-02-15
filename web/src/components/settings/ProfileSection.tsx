@@ -22,6 +22,12 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
   const [avatarColor, setAvatarColor] = useState<string | null>(null);
   const [profileSaving, setProfileSaving] = useState(false);
 
+  // AI appearance
+  const [aiName, setAiName] = useState('');
+  const [aiAvatarEmoji, setAiAvatarEmoji] = useState<string | null>(null);
+  const [aiAvatarColor, setAiAvatarColor] = useState<string | null>(null);
+  const [aiAppearanceSaving, setAiAppearanceSaving] = useState(false);
+
   // Password
   const [currentPwd, setCurrentPwd] = useState('');
   const [newPwd, setNewPwd] = useState('');
@@ -32,7 +38,10 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
     setDisplayName(currentUser?.display_name || '');
     setAvatarEmoji(currentUser?.avatar_emoji ?? null);
     setAvatarColor(currentUser?.avatar_color ?? null);
-  }, [currentUser?.username, currentUser?.display_name, currentUser?.avatar_emoji, currentUser?.avatar_color]);
+    setAiName(currentUser?.ai_name || '');
+    setAiAvatarEmoji(currentUser?.ai_avatar_emoji ?? null);
+    setAiAvatarColor(currentUser?.ai_avatar_color ?? null);
+  }, [currentUser?.username, currentUser?.display_name, currentUser?.avatar_emoji, currentUser?.avatar_color, currentUser?.ai_name, currentUser?.ai_avatar_emoji, currentUser?.ai_avatar_color]);
 
   const handleUpdateProfile = async () => {
     setProfileSaving(true);
@@ -66,6 +75,24 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
       setError(getErrorMessage(err, '修改密码失败'));
     } finally {
       setPwdChanging(false);
+    }
+  };
+
+  const handleSaveAiAppearance = async () => {
+    setAiAppearanceSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await updateProfile({
+        ai_name: aiName.trim() || null,
+        ai_avatar_emoji: aiAvatarEmoji,
+        ai_avatar_color: aiAvatarColor,
+      });
+      setNotice('机器人外观已更新');
+    } catch (err) {
+      setError(getErrorMessage(err, '更新机器人外观失败'));
+    } finally {
+      setAiAppearanceSaving(false);
     }
   };
 
@@ -138,6 +165,53 @@ export function ProfileSection({ setNotice, setError }: ProfileSectionProps) {
           >
             {profileSaving && <Loader2 className="size-4 animate-spin" />}
             保存基础信息
+          </Button>
+        </div>
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-slate-200" />
+
+      {/* AI Appearance */}
+      <div>
+        <h3 className="text-base font-semibold text-slate-900 mb-4">机器人外观</h3>
+        <p className="text-xs text-slate-500 mb-4">
+          自定义你的 AI 助手的名称和头像，仅影响你看到的对话界面。
+        </p>
+        <div className="space-y-4">
+          <div className="flex items-center gap-4 mb-4">
+            <EmojiAvatar
+              emoji={aiAvatarEmoji}
+              color={aiAvatarColor}
+              fallbackChar={aiName || 'AI'}
+              size="lg"
+            />
+            <div className="text-sm text-slate-500">
+              设置机器人的 Emoji 和背景色
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">AI 名称</label>
+            <Input
+              type="text"
+              value={aiName}
+              onChange={(e) => setAiName(e.target.value)}
+              placeholder="留空使用系统默认"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-2">Emoji</label>
+            <EmojiPicker value={aiAvatarEmoji ?? undefined} onChange={setAiAvatarEmoji} />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-2">背景色</label>
+            <ColorPicker value={aiAvatarColor ?? undefined} onChange={setAiAvatarColor} />
+          </div>
+        </div>
+        <div className="mt-4">
+          <Button onClick={handleSaveAiAppearance} disabled={aiAppearanceSaving}>
+            {aiAppearanceSaving && <Loader2 className="size-4 animate-spin" />}
+            保存机器人外观
           </Button>
         </div>
       </div>

@@ -10,7 +10,9 @@ import {
   UserCog,
   Info,
   Palette,
+  MessageSquare,
 } from 'lucide-react';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type { SettingsTab } from './types';
 
 interface NavItem {
@@ -29,6 +31,7 @@ const systemItems: NavItem[] = [
 
 const accountItems: NavItem[] = [
   { key: 'profile', label: '个人资料', icon: <User className="w-4 h-4" />, group: 'account' },
+  { key: 'my-channels', label: '消息通道', icon: <MessageSquare className="w-4 h-4" />, group: 'account' },
   { key: 'security', label: '安全与设备', icon: <Shield className="w-4 h-4" />, group: 'account' },
 ];
 
@@ -46,9 +49,11 @@ interface SettingsNavProps {
   canManageSystemConfig: boolean;
   canManageUsers: boolean;
   mustChangePassword: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
-export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, canManageUsers, mustChangePassword }: SettingsNavProps) {
+export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, canManageUsers, mustChangePassword, open, onOpenChange }: SettingsNavProps) {
   const visibleItems: { group: string; items: NavItem[] }[] = [];
 
   if (canManageSystemConfig) {
@@ -103,32 +108,51 @@ export function SettingsNav({ activeTab, onTabChange, canManageSystemConfig, can
         ))}
       </nav>
 
-      {/* Mobile: horizontal scrollable tabs */}
-      <nav className="lg:hidden sticky top-0 z-10 bg-white border-b border-slate-200 px-4 py-2 overflow-x-auto">
-        <div className="flex gap-1 min-w-max">
-          {visibleItems.flatMap((section) => section.items).map((item) => {
-            const active = activeTab === item.key;
-            const disabled = isDisabled(item);
-            return (
-              <button
-                key={item.key}
-                onClick={() => !disabled && onTabChange(item.key)}
-                disabled={disabled}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
-                  active
-                    ? 'bg-brand-50 text-primary font-medium'
-                    : disabled
-                      ? 'text-slate-300 cursor-not-allowed'
-                      : 'text-slate-500 hover:bg-slate-50'
-                }`}
-              >
-                {item.icon}
-                {item.label}
-              </button>
-            );
-          })}
-        </div>
-      </nav>
+      {/* Mobile: left sheet drawer */}
+      <Sheet open={open} onOpenChange={onOpenChange}>
+        <SheetContent side="left" className="w-64 p-0" showCloseButton={false}>
+          <SheetHeader className="px-4 pt-5 pb-2">
+            <SheetTitle className="text-base">设置</SheetTitle>
+          </SheetHeader>
+          <nav className="px-3 pb-4 overflow-y-auto">
+            {visibleItems.map((section, si) => (
+              <div key={section.group} className={si > 0 ? 'mt-5' : ''}>
+                <div className="px-3 mb-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  {section.group}
+                </div>
+                <div className="space-y-1">
+                  {section.items.map((item) => {
+                    const active = activeTab === item.key;
+                    const disabled = isDisabled(item);
+                    return (
+                      <button
+                        key={item.key}
+                        onClick={() => {
+                          if (!disabled) {
+                            onTabChange(item.key);
+                            onOpenChange?.(false);
+                          }
+                        }}
+                        disabled={disabled}
+                        className={`w-full flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-brand-50 text-primary font-medium'
+                            : disabled
+                              ? 'text-slate-300 cursor-not-allowed'
+                              : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                        }`}
+                      >
+                        {item.icon}
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </nav>
+        </SheetContent>
+      </Sheet>
     </>
   );
 }

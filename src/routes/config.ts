@@ -31,6 +31,10 @@ import {
   saveRegistrationConfig,
   getAppearanceConfig,
   saveAppearanceConfig,
+  getUserFeishuConfig,
+  saveUserFeishuConfig,
+  getUserTelegramConfig,
+  saveUserTelegramConfig,
 } from '../runtime-config.js';
 import type { AuthUser } from '../types.js';
 import { hasPermission } from '../permissions.js';
@@ -493,6 +497,7 @@ configRoutes.get('/appearance/public', (c) => {
   try {
     const config = getAppearanceConfig();
     return c.json({
+      appName: config.appName,
       aiName: config.aiName,
       aiAvatarEmoji: config.aiAvatarEmoji,
       aiAvatarColor: config.aiAvatarColor,
@@ -500,6 +505,186 @@ configRoutes.get('/appearance/public', (c) => {
   } catch (err) {
     logger.error({ err }, 'Failed to load public appearance config');
     return c.json({ error: 'Failed to load appearance config' }, 500);
+  }
+});
+
+// ─── Per-user IM config (all logged-in users) ─────────────────────
+
+configRoutes.get('/user-im/feishu', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const config = getUserFeishuConfig(user.id);
+    if (!config) {
+      return c.json({
+        appId: '',
+        hasAppSecret: false,
+        appSecretMasked: null,
+        enabled: false,
+        updatedAt: null,
+      });
+    }
+    return c.json(toPublicFeishuProviderConfig(config, 'runtime'));
+  } catch (err) {
+    logger.error({ err }, 'Failed to load user Feishu config');
+    return c.json({ error: 'Failed to load user Feishu config' }, 500);
+  }
+});
+
+configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const validation = FeishuConfigSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+
+  const current = getUserFeishuConfig(user.id);
+  const next = {
+    appId: current?.appId || '',
+    appSecret: current?.appSecret || '',
+    enabled: current?.enabled ?? true,
+    updatedAt: current?.updatedAt || null,
+  };
+  if (typeof validation.data.appId === 'string') {
+    const appId = validation.data.appId.trim();
+    if (appId) next.appId = appId;
+  }
+  if (typeof validation.data.appSecret === 'string') {
+    const appSecret = validation.data.appSecret.trim();
+    if (appSecret) next.appSecret = appSecret;
+  } else if (validation.data.clearAppSecret === true) {
+    next.appSecret = '';
+  }
+  if (typeof validation.data.enabled === 'boolean') {
+    next.enabled = validation.data.enabled;
+  } else if (!current && (next.appId || next.appSecret)) {
+    // First-time config with credentials should connect immediately.
+    next.enabled = true;
+  }
+
+  try {
+    const saved = saveUserFeishuConfig(user.id, {
+      appId: next.appId,
+      appSecret: next.appSecret,
+      enabled: next.enabled,
+    });
+
+    // Hot-reload: reconnect user's Feishu channel
+    if (deps?.reloadUserIMConfig) {
+      try {
+        await deps.reloadUserIMConfig(user.id, 'feishu');
+      } catch (err) {
+        logger.warn({ err, userId: user.id }, 'Failed to hot-reload user Feishu connection');
+      }
+    }
+
+    return c.json(toPublicFeishuProviderConfig(saved, 'runtime'));
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Invalid Feishu config payload';
+    logger.warn({ err }, 'Invalid user Feishu config payload');
+    return c.json({ error: message }, 400);
+  }
+});
+
+configRoutes.get('/user-im/telegram', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const config = getUserTelegramConfig(user.id);
+    if (!config) {
+      return c.json({
+        hasBotToken: false,
+        botTokenMasked: null,
+        enabled: false,
+        updatedAt: null,
+      });
+    }
+    return c.json(toPublicTelegramProviderConfig(config, 'runtime'));
+  } catch (err) {
+    logger.error({ err }, 'Failed to load user Telegram config');
+    return c.json({ error: 'Failed to load user Telegram config' }, 500);
+  }
+});
+
+configRoutes.put('/user-im/telegram', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const validation = TelegramConfigSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+
+  const current = getUserTelegramConfig(user.id);
+  const next = {
+    botToken: current?.botToken || '',
+    enabled: current?.enabled ?? true,
+    updatedAt: current?.updatedAt || null,
+  };
+  if (typeof validation.data.botToken === 'string') {
+    const botToken = validation.data.botToken.trim();
+    if (botToken) next.botToken = botToken;
+  } else if (validation.data.clearBotToken === true) {
+    next.botToken = '';
+  }
+  if (typeof validation.data.enabled === 'boolean') {
+    next.enabled = validation.data.enabled;
+  } else if (!current && next.botToken) {
+    // First-time config with token should connect immediately.
+    next.enabled = true;
+  }
+
+  try {
+    const saved = saveUserTelegramConfig(user.id, {
+      botToken: next.botToken,
+      enabled: next.enabled,
+    });
+
+    // Hot-reload: reconnect user's Telegram channel
+    if (deps?.reloadUserIMConfig) {
+      try {
+        await deps.reloadUserIMConfig(user.id, 'telegram');
+      } catch (err) {
+        logger.warn({ err, userId: user.id }, 'Failed to hot-reload user Telegram connection');
+      }
+    }
+
+    return c.json(toPublicTelegramProviderConfig(saved, 'runtime'));
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Invalid Telegram config payload';
+    logger.warn({ err }, 'Invalid user Telegram config payload');
+    return c.json({ error: message }, 400);
+  }
+});
+
+configRoutes.post('/user-im/telegram/test', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const config = getUserTelegramConfig(user.id);
+  if (!config?.botToken) {
+    return c.json({ error: 'Telegram bot token not configured' }, 400);
+  }
+
+  try {
+    const { Bot } = await import('grammy');
+    const testBot = new Bot(config.botToken);
+    const me = await testBot.api.getMe();
+    return c.json({
+      success: true,
+      bot_username: me.username,
+      bot_id: me.id,
+      bot_name: me.first_name,
+    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to connect to Telegram';
+    logger.warn({ err }, 'Failed to test user Telegram connection');
+    return c.json({ error: message }, 400);
   }
 });
 

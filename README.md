@@ -56,14 +56,15 @@
 | **Telegram** | Bot API (Long Polling) | Markdown → HTML | 长消息自动分片（3800 字符） |
 | **Web** | WebSocket 实时通信 | 流式 Markdown | 图片粘贴/拖拽上传、虚拟滚动 |
 
-消息统一路由：飞书来源回飞书，Telegram 来源回 Telegram，Web 来源回 Web。
+每个用户可独立配置自己的 IM 通道（飞书应用凭据、Telegram Bot Token），互不干扰。消息统一路由：飞书来源回飞书，Telegram 来源回 Telegram，Web 来源回 Web。
 
 ### Agent 执行引擎
 
 基于 [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/claude-agent-sdk) 构建，SDK 底层调用完整的 Claude Code CLI。
 
-- **宿主机模式**（默认）— Agent 直接在宿主机运行，访问本地文件系统，零 Docker 依赖
-- **容器模式** — Docker 隔离执行，非 root 用户，预装 40+ 工具（Chromium、Python、ffmpeg、数据库客户端等）
+- **Per-user 主容器** — 每个用户拥有一个固定的主容器（admin 使用宿主机模式，member 使用容器模式），IM 消息路由到各自的主容器
+- **宿主机模式** — Agent 直接在宿主机运行，访问本地文件系统，零 Docker 依赖（admin 主容器默认模式）
+- **容器模式** — Docker 隔离执行，非 root 用户，预装 40+ 工具（member 主容器默认模式）
 - **多会话并发** — 最多 20 个容器 + 5 个宿主机进程同时运行，会话级队列调度
 - **自定义工作目录** — 每个会话可配置 `customCwd` 指向不同项目
 - **失败自动恢复** — 指数退避重试（5s → 80s，最多 5 次），上下文溢出自动压缩并归档历史
@@ -88,7 +89,7 @@ Agent 在运行时可通过内置 MCP Server 与主进程通信：
 | `schedule_task` | 创建定时/周期/一次性任务（cron / interval / once） |
 | `list_tasks` | 列出定时任务 |
 | `pause_task` / `resume_task` / `cancel_task` | 暂停、恢复、取消任务 |
-| `register_group` | 注册新群组（仅主会话） |
+| `register_group` | 注册新群组（仅 admin 主容器） |
 | `memory_append` | 追加时效性记忆到 `memory/YYYY-MM-DD.md` |
 | `memory_search` | 全文检索工作区记忆文件 |
 | `memory_get` | 读取记忆文件内容 |
@@ -127,11 +128,14 @@ Agent 自主维护跨会话的持久记忆：
 
 | 能力 | 说明 |
 |------|------|
+| **用户隔离** | 每个用户拥有独立的主容器（`home-{userId}`）、工作目录、IM 通道 |
+| **个性化设置** | 用户可自定义 AI 名称、头像 emoji 和颜色 |
 | **RBAC** | 5 种权限，4 种角色模板（admin_full / member_basic / ops_manager / user_admin） |
 | **注册控制** | 开放注册 / 邀请码注册 / 关闭注册 |
 | **审计日志** | 18 种事件类型，完整操作追踪 |
 | **加密存储** | API 密钥 AES-256-GCM 加密，Web API 仅返回掩码值 |
 | **挂载安全** | 白名单校验 + 黑名单模式匹配（`.ssh`、`.gnupg` 等敏感路径） |
+| **终端权限** | 用户可访问自己容器的 Web 终端（宿主机模式不支持） |
 | **登录保护** | 5 次失败锁定 15 分钟，bcrypt 12 轮，HMAC Cookie，30 天会话有效期 |
 | **PWA** | 可安装为桌面/移动应用，iOS 适配 |
 
@@ -233,19 +237,19 @@ make start
 
 1. **创建管理员** — 自定义用户名和密码（无默认账号）
 2. **配置 Claude API** — 填入 API 密钥和模型（支持中转服务）
-3. **配置 IM 集成**（可选）— 飞书 App ID/Secret 或 Telegram Bot Token
+3. **配置 IM 通道**（可选）— 飞书 App ID/Secret 或 Telegram Bot Token（每个用户可独立配置）
 4. **开始对话** — 在 Web 聊天页面直接发送消息
 
 > 所有配置通过 Web 界面完成，无需手动编辑 `.env` 文件。API 密钥 AES-256-GCM 加密存储。
 
 ### 执行模式
 
-| 模式 | 说明 | 前置要求 |
-|------|------|---------|
-| **宿主机模式**（默认） | Agent 直接在宿主机运行，访问本地文件系统 | Claude Code CLI |
-| **容器模式** | Agent 在 Docker 容器中隔离运行，预装 40+ 工具 | Docker Desktop |
+| 模式 | 说明 | 适用对象 | 前置要求 |
+|------|------|---------|---------|
+| **宿主机模式** | Agent 直接在宿主机运行，访问本地文件系统 | admin 主容器（`folder=main`） | Claude Code CLI |
+| **容器模式** | Agent 在 Docker 容器中隔离运行，预装 40+ 工具 | member 主容器（`folder=home-{userId}`） | Docker Desktop |
 
-主会话默认使用宿主机模式，开箱即用。如需容器模式：
+admin 主容器默认使用宿主机模式，开箱即用。member 注册后自动创建容器模式的主容器。如需容器模式：
 
 ```bash
 # 构建容器镜像
@@ -291,15 +295,16 @@ happyclaw/
 │   ├── index.ts                  #   入口：消息轮询、IPC 监听、容器生命周期
 │   ├── web.ts                    #   Hono 应用、WebSocket、静态文件
 │   ├── routes/                   #   路由（auth / groups / files / config / monitor / memory / tasks / skills / admin）
-│   ├── feishu.ts                 #   飞书 WebSocket 长连接
-│   ├── telegram.ts               #   Telegram Bot 集成
+│   ├── feishu.ts                 #   飞书连接工厂（WebSocket 长连接）
+│   ├── telegram.ts               #   Telegram 连接工厂（Bot API）
+│   ├── im-manager.ts             #   IM 连接池（per-user 飞书/Telegram 连接管理）
 │   ├── container-runner.ts       #   Docker / 宿主机进程管理
 │   ├── group-queue.ts            #   并发控制队列
 │   ├── runtime-config.ts         #   AES-256-GCM 加密配置
 │   ├── task-scheduler.ts         #   定时任务调度
 │   ├── file-manager.ts           #   文件安全（路径遍历防护）
 │   ├── mount-security.ts         #   挂载白名单 / 黑名单
-│   └── db.ts                     #   SQLite 数据层（Schema v1→v10）
+│   └── db.ts                     #   SQLite 数据层（Schema v1→v13）
 │
 ├── web/                          # 前端 (React + Vite)
 │   └── src/

@@ -30,9 +30,27 @@ interface ContainerInput {
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
-  isMain: boolean;
+  /** @deprecated Use isHome + isAdminHome instead. Kept for backward compatibility with older host processes. */
+  isMain?: boolean;
+  /** Whether this is the user's home container (admin or member). */
+  isHome?: boolean;
+  /** Whether this is the admin's home container (full privileges). */
+  isAdminHome?: boolean;
   isScheduledTask?: boolean;
   images?: Array<{ data: string; mimeType?: string }>;
+}
+
+/**
+ * Normalize isMain/isHome/isAdminHome flags for backward compatibility.
+ * If the host sends the old `isMain` field, treat it as isHome=true + isAdminHome=true.
+ */
+function normalizeHomeFlags(input: ContainerInput): { isHome: boolean; isAdminHome: boolean } {
+  if (input.isHome !== undefined) {
+    return { isHome: !!input.isHome, isAdminHome: !!input.isAdminHome };
+  }
+  // Legacy: isMain was the only flag
+  const legacy = !!input.isMain;
+  return { isHome: legacy, isAdminHome: legacy };
 }
 
 // --- Streaming event types ---
@@ -252,7 +270,7 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
 /**
  * Archive the full transcript to conversations/ before compaction.
  */
-function createPreCompactHook(isMain: boolean): HookCallback {
+function createPreCompactHook(_isHome: boolean, isAdminHome: boolean): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preCompact = input as PreCompactHookInput;
     const transcriptPath = preCompact.transcript_path;
@@ -290,10 +308,10 @@ function createPreCompactHook(isMain: boolean): HookCallback {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Flag memory flush for main container
-    if (isMain) {
+    // Flag memory flush for admin home container (full memory write access)
+    if (isAdminHome) {
       needsMemoryFlush = true;
-      log('PreCompact: flagged memory flush for main container');
+      log('PreCompact: flagged memory flush for admin home container');
     }
 
     return {};
@@ -444,8 +462,9 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
   });
 }
 
-function buildMemoryRecallPrompt(isMain: boolean): string {
-  if (isMain) {
+function buildMemoryRecallPrompt(isHome: boolean, isAdminHome: boolean): string {
+  if (isAdminHome) {
+    // Admin home container: full memory system with read/write access to global CLAUDE.md
     return [
       '',
       '## 记忆系统',
@@ -487,6 +506,25 @@ function buildMemoryRecallPrompt(isMain: boolean): string {
       '系统也会在上下文压缩前提示你保存记忆。',
     ].join('\n');
   }
+  if (isHome) {
+    // Member home container: recall prompt with memory_search/get/append, but no global CLAUDE.md write
+    return [
+      '',
+      '## 记忆',
+      '',
+      '你拥有跨会话的持久记忆能力，请积极使用。',
+      '',
+      '### 回忆',
+      '在回答关于过去的工作、决策、日期、偏好或待办事项之前：',
+      '先用 `memory_search` 搜索，再用 `memory_get` 获取完整上下文。',
+      '',
+      '### 存储',
+      '获知重要信息（项目决策、待办、讨论要点等）时，**必须立即**调用 `memory_append` 保存。',
+      '不要等待——获知后立刻存储。',
+      '全局记忆（`/workspace/global/CLAUDE.md`）为只读，无法直接修改。',
+    ].join('\n');
+  }
+  // Non-home group container
   return [
     '',
     '## 记忆',
@@ -648,13 +686,16 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
-  // Build system prompt: memory recall guidance + global CLAUDE.md (for non-main)
+  // Build system prompt: memory recall guidance + global CLAUDE.md (for non-admin-home)
+  const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
   const globalClaudeMdPath = path.join(WORKSPACE_GLOBAL, 'CLAUDE.md');
 
   let systemPromptAppend: string;
-  if (containerInput.isMain) {
+  if (isAdminHome) {
+    // Admin home: global CLAUDE.md is directly accessible via filesystem, only append memory recall
     systemPromptAppend = memoryRecall;
   } else {
+    // Member home and non-home: inject global CLAUDE.md into system prompt (read-only access)
     let globalClaudeMd = '';
     if (fs.existsSync(globalClaudeMdPath)) {
       globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
@@ -667,9 +708,9 @@ async function runQuery(
   // 追踪顶层工具执行状态（用于精确发送 tool_use_end）
   let activeTopLevelToolUseId: string | null = null;
 
-  // 主会话可访问全局和记忆目录；非主会话仅访问记忆目录
-  // （非主会话的全局 CLAUDE.md 已通过 systemPromptAppend 注入，无需文件系统写权限）
-  const extraDirs = containerInput.isMain
+  // Admin home can access global and memory directories; others only access memory
+  // (non-admin-home gets global CLAUDE.md injected via systemPromptAppend, no filesystem write needed)
+  const extraDirs = isAdminHome
     ? [WORKSPACE_GLOBAL, WORKSPACE_MEMORY]
     : [WORKSPACE_MEMORY];
 
@@ -695,7 +736,10 @@ async function runQuery(
           env: {
             HAPPYCLAW_CHAT_JID: containerInput.chatJid,
             HAPPYCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            HAPPYCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            HAPPYCLAW_IS_HOME: isHome ? '1' : '0',
+            HAPPYCLAW_IS_ADMIN_HOME: isAdminHome ? '1' : '0',
+            // Legacy compat: keep IS_MAIN for any external tools that may read it
+            HAPPYCLAW_IS_MAIN: isAdminHome ? '1' : '0',
             HAPPYCLAW_WORKSPACE_GROUP: WORKSPACE_GROUP,
             HAPPYCLAW_WORKSPACE_GLOBAL: WORKSPACE_GLOBAL,
             HAPPYCLAW_WORKSPACE_MEMORY: WORKSPACE_MEMORY,
@@ -704,7 +748,7 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.isMain)] }]
+        PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome)] }]
       },
     }
   })) {
@@ -928,7 +972,8 @@ async function main(): Promise<void> {
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
 
   let sessionId = containerInput.sessionId;
-  const memoryRecallPrompt = buildMemoryRecallPrompt(containerInput.isMain);
+  const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
+  const memoryRecallPrompt = buildMemoryRecallPrompt(isHome, isAdminHome);
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
   // Clean up stale _close sentinel from previous container runs
@@ -1011,8 +1056,8 @@ async function main(): Promise<void> {
         break;
       }
 
-      // Memory Flush: run an extra query to let agent save durable memories
-      if (needsMemoryFlush && containerInput.isMain) {
+      // Memory Flush: run an extra query to let agent save durable memories (admin home only)
+      if (needsMemoryFlush && isAdminHome) {
         needsMemoryFlush = false;
         log('Running memory flush query after compaction...');
 

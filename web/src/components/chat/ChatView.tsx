@@ -59,6 +59,7 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
     clearStreaming,
   } = useChatStore();
 
+  const currentUser = useAuthStore(s => s.user);
   const appearance = useAuthStore(s => s.appearance);
   const group = groups[groupJid];
   const canUseTerminal = group?.execution_mode !== 'host';
@@ -252,7 +253,7 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
   return (
     <div ref={containerRef} className="h-full flex flex-col bg-background">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-2.5 bg-white/80 backdrop-blur-sm border-b border-slate-200/60">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b lg:bg-white/80 lg:backdrop-blur-sm lg:border-slate-200/60 max-lg:bg-white/60 max-lg:backdrop-blur-xl max-lg:saturate-[1.8] max-lg:border-white/20 max-lg:shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_1px_rgba(255,255,255,0.6)]">
         {onBack && (
           <button
             onClick={onBack}
@@ -265,7 +266,7 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
         <div className="flex-1 min-w-0">
           <h2 className="font-semibold text-slate-900 text-[15px] truncate">{group.name}</h2>
           <p className="text-xs text-slate-500">
-            {isWaiting ? '正在思考...' : group.folder === 'main' ? '主容器' : '容器'}
+            {isWaiting ? '正在思考...' : group.is_home ? '主容器' : '容器'}
           </p>
         </div>
         {/* Desktop: toggle side panel */}
@@ -300,7 +301,7 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
             hasMore={hasMoreMessages}
             onLoadMore={handleLoadMore}
           />
-          <StreamingDisplay groupJid={groupJid} isWaiting={isWaiting} senderName={appearance?.aiName || group?.name || 'AI'} />
+          <StreamingDisplay groupJid={groupJid} isWaiting={isWaiting} senderName={currentUser?.ai_name || appearance?.aiName || group?.name || 'AI'} />
           <MessageInput
             onSend={handleSend}
             groupJid={groupJid}

@@ -2,7 +2,8 @@ export interface GroupInfo {
   name: string;
   folder: string;
   added_at: string;
-  kind?: 'main' | 'feishu' | 'web';
+  kind?: 'home' | 'main' | 'feishu' | 'web';
+  is_home?: boolean;
   editable?: boolean;
   deletable?: boolean;
   lastMessage?: string;

@@ -1073,12 +1073,14 @@ const APPEARANCE_CONFIG_FILE = path.join(
 );
 
 export interface AppearanceConfig {
+  appName: string;
   aiName: string;
   aiAvatarEmoji: string;
   aiAvatarColor: string;
 }
 
 const DEFAULT_APPEARANCE_CONFIG: AppearanceConfig = {
+  appName: ASSISTANT_NAME,
   aiName: ASSISTANT_NAME,
   aiAvatarEmoji: '\u{1F431}',
   aiAvatarColor: '#0d9488',
@@ -1093,6 +1095,10 @@ export function getAppearanceConfig(): AppearanceConfig {
       fs.readFileSync(APPEARANCE_CONFIG_FILE, 'utf-8'),
     ) as Record<string, unknown>;
     return {
+      appName:
+        typeof raw.appName === 'string' && raw.appName
+          ? raw.appName
+          : DEFAULT_APPEARANCE_CONFIG.appName,
       aiName:
         typeof raw.aiName === 'string' && raw.aiName
           ? raw.aiName
@@ -1116,9 +1122,11 @@ export function getAppearanceConfig(): AppearanceConfig {
 }
 
 export function saveAppearanceConfig(
-  next: AppearanceConfig,
+  next: Partial<Pick<AppearanceConfig, 'appName'>> & Omit<AppearanceConfig, 'appName'>,
 ): AppearanceConfig {
+  const existing = getAppearanceConfig();
   const config = {
+    appName: next.appName || existing.appName,
     aiName: next.aiName,
     aiAvatarEmoji: next.aiAvatarEmoji,
     aiAvatarColor: next.aiAvatarColor,
@@ -1129,8 +1137,130 @@ export function saveAppearanceConfig(
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmp, APPEARANCE_CONFIG_FILE);
   return {
+    appName: config.appName,
     aiName: config.aiName,
     aiAvatarEmoji: config.aiAvatarEmoji,
     aiAvatarColor: config.aiAvatarColor,
   };
+}
+
+// ─── Per-user IM config (AES-256-GCM encrypted) ─────────────────
+
+const USER_IM_CONFIG_DIR = path.join(DATA_DIR, 'config', 'user-im');
+
+export interface UserFeishuConfig {
+  appId: string;
+  appSecret: string;
+  enabled?: boolean;
+  updatedAt: string | null;
+}
+
+export interface UserTelegramConfig {
+  botToken: string;
+  enabled?: boolean;
+  updatedAt: string | null;
+}
+
+function userImDir(userId: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(userId)) {
+    throw new Error('Invalid userId');
+  }
+  return path.join(USER_IM_CONFIG_DIR, userId);
+}
+
+export function getUserFeishuConfig(userId: string): UserFeishuConfig | null {
+  const filePath = path.join(userImDir(userId), 'feishu.json');
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (parsed.version !== 1) return null;
+
+    const stored = parsed as unknown as StoredFeishuProviderConfigV1;
+    const secret = decryptFeishuSecret(stored.secret);
+    return {
+      appId: normalizeFeishuAppId(stored.appId ?? ''),
+      appSecret: secret.appSecret,
+      enabled: stored.enabled,
+      updatedAt: stored.updatedAt || null,
+    };
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user Feishu config');
+    return null;
+  }
+}
+
+export function saveUserFeishuConfig(
+  userId: string,
+  next: Omit<UserFeishuConfig, 'updatedAt'>,
+): UserFeishuConfig {
+  const normalized: UserFeishuConfig = {
+    appId: normalizeFeishuAppId(next.appId),
+    appSecret: normalizeSecret(next.appSecret, 'appSecret'),
+    enabled: next.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredFeishuProviderConfigV1 = {
+    version: 1,
+    appId: normalized.appId,
+    enabled: normalized.enabled,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptFeishuSecret({ appSecret: normalized.appSecret }),
+  };
+
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'feishu.json');
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, filePath);
+  return normalized;
+}
+
+export function getUserTelegramConfig(userId: string): UserTelegramConfig | null {
+  const filePath = path.join(userImDir(userId), 'telegram.json');
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (parsed.version !== 1) return null;
+
+    const stored = parsed as unknown as StoredTelegramProviderConfigV1;
+    const secret = decryptTelegramSecret(stored.secret);
+    return {
+      botToken: secret.botToken,
+      enabled: stored.enabled,
+      updatedAt: stored.updatedAt || null,
+    };
+  } catch (err) {
+    logger.warn({ err, userId }, 'Failed to read user Telegram config');
+    return null;
+  }
+}
+
+export function saveUserTelegramConfig(
+  userId: string,
+  next: Omit<UserTelegramConfig, 'updatedAt'>,
+): UserTelegramConfig {
+  const normalized: UserTelegramConfig = {
+    botToken: normalizeSecret(next.botToken, 'botToken'),
+    enabled: next.enabled,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const payload: StoredTelegramProviderConfigV1 = {
+    version: 1,
+    enabled: normalized.enabled,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptTelegramSecret({ botToken: normalized.botToken }),
+  };
+
+  const dir = userImDir(userId);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, 'telegram.json');
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, filePath);
+  return normalized;
 }
