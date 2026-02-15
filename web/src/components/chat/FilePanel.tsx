@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useFileStore, FileEntry, toBase64Url } from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
+import { withBasePath } from '../../utils/url';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Button } from '@/components/ui/button';
@@ -113,7 +114,7 @@ function ImagePreview({
     return () => window.removeEventListener('keydown', handleEsc);
   }, [onClose]);
 
-  const previewUrl = `/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(file.path)}`;
+  const previewUrl = withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(file.path)}`);
 
   return createPortal(
     <div
@@ -359,7 +360,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
 
   const handleDownload = (item: FileEntry) => {
     const encoded = toBase64Url(item.path);
-    window.open(`/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`, '_blank');
+    window.open(withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`), '_blank');
   };
 
   const handleDeleteClick = (item: FileEntry) => {

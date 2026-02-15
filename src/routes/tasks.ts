@@ -155,7 +155,8 @@ tasksRoutes.get('/:id/logs', authMiddleware, (c) => {
       403,
     );
   }
-  const limit = parseInt(c.req.query('limit') || '20', 10);
+  const limitRaw = parseInt(c.req.query('limit') || '20', 10);
+  const limit = Math.min(Number.isFinite(limitRaw) ? Math.max(1, limitRaw) : 20, 200);
   const logs = getTaskRunLogs(id, limit);
   return c.json({ logs });
 });

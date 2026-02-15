@@ -14,6 +14,9 @@ export const TaskPatchSchema = z.object({
   next_run: z.string().optional(),
 });
 
+// 简单 cron 表达式验证：5 或 6 段，每段允许 * 和常见 cron 语法
+const CRON_REGEX = /^(\S+\s+){4,5}\S+$/;
+
 export const TaskCreateSchema = z.object({
   group_folder: z.string().min(1),
   chat_jid: z.string().min(1),
@@ -21,6 +24,34 @@ export const TaskCreateSchema = z.object({
   schedule_type: z.enum(['cron', 'interval', 'once']),
   schedule_value: z.string().min(1),
   context_mode: z.enum(['group', 'isolated']).optional(),
+}).superRefine((data, ctx) => {
+  if (data.schedule_type === 'cron') {
+    if (!CRON_REGEX.test(data.schedule_value.trim())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule_value'],
+        message: 'Invalid cron expression (expected 5 or 6 fields)',
+      });
+    }
+  } else if (data.schedule_type === 'interval') {
+    const num = Number(data.schedule_value);
+    if (!Number.isFinite(num) || num <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule_value'],
+        message: 'Interval must be a positive number (milliseconds)',
+      });
+    }
+  } else if (data.schedule_type === 'once') {
+    const ts = Date.parse(data.schedule_value);
+    if (isNaN(ts)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule_value'],
+        message: 'Once schedule must be a valid ISO 8601 date string',
+      });
+    }
+  }
 });
 
 // 单张图片附件上限 5MB（base64 编码后约 6.67MB）
@@ -230,6 +261,28 @@ export const ContainerEnvSchema = z.object({
     .refine((env) => !env || Object.keys(env).length <= 50, {
       message: 'customEnv must have at most 50 entries',
     }),
+});
+
+// Terminal WebSocket message schemas
+export const TerminalStartSchema = z.object({
+  chatJid: z.string().min(1),
+  cols: z.number().int().optional(),
+  rows: z.number().int().optional(),
+});
+
+export const TerminalInputSchema = z.object({
+  chatJid: z.string().min(1),
+  data: z.string().min(1).max(8192),
+});
+
+export const TerminalResizeSchema = z.object({
+  chatJid: z.string().min(1),
+  cols: z.number().int().optional(),
+  rows: z.number().int().optional(),
+});
+
+export const TerminalStopSchema = z.object({
+  chatJid: z.string().min(1),
 });
 
 // Memory types

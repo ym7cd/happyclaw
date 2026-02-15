@@ -94,6 +94,32 @@ const TEXT_EXTENSIONS = new Set([
   'svg',
 ]);
 
+// 允许 inline 预览的安全 MIME 类型（排除 HTML 和 SVG 以防止 XSS）
+const SAFE_PREVIEW_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'text/plain',
+  'text/markdown',
+  'text/css',
+  'text/csv',
+  'text/yaml',
+  'text/x-python',
+  'text/x-go',
+  'text/x-rust',
+  'text/x-java',
+  'text/x-c',
+  'text/x-c++',
+  'text/x-sh',
+  'text/x-toml',
+  'text/javascript',
+  'text/typescript',
+  'application/json',
+  'application/xml',
+  'application/pdf',
+]);
+
 /**
  * 获取文件操作的根目录覆盖。
  * 宿主机模式下设置了 customCwd 时，文件面板以 customCwd 为根。
@@ -309,10 +335,24 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
 
     // 读取文件并返回
     const fileContent = fs.readFileSync(absolutePath);
+    const fileName = path.basename(absolutePath);
 
-    c.header('Content-Type', mimeType);
-    c.header('Content-Disposition', 'inline');
+    // 安全头：始终添加 CSP sandbox 和 nosniff
+    c.header('Content-Security-Policy', "default-src 'none'; sandbox");
     c.header('X-Content-Type-Options', 'nosniff');
+
+    if (SAFE_PREVIEW_MIME_TYPES.has(mimeType)) {
+      // 安全类型：允许 inline 预览
+      c.header('Content-Type', mimeType);
+      c.header('Content-Disposition', 'inline');
+    } else {
+      // 不安全类型（HTML、SVG 等）：强制下载
+      c.header('Content-Type', 'application/octet-stream');
+      c.header(
+        'Content-Disposition',
+        `attachment; filename="${encodeURIComponent(fileName)}"`,
+      );
+    }
 
     return c.body(fileContent);
   } catch (error) {

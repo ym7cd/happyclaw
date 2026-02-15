@@ -52,8 +52,14 @@ export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 // Web server configuration
 export const WEB_PORT = parseInt(process.env.WEB_PORT || '3000', 10);
-export const WEB_USERNAME = process.env.WEB_USERNAME || 'admin';
-export const WEB_PASSWORD = process.env.WEB_PASSWORD || '';
+
+// Cookie configuration
+// Production (non-localhost): use __Host- prefix (requires Secure; Path=/; no Domain)
+// Development (localhost): use plain name (no Secure flag needed)
+const isProduction = process.env.NODE_ENV === 'production';
+export const SESSION_COOKIE_NAME = isProduction
+  ? '__Host-happyclaw_session'
+  : 'happyclaw_session';
 const SESSION_SECRET_FILE = path.resolve(
   process.cwd(),
   'data',
@@ -78,7 +84,7 @@ function getOrCreateSessionSecret(): string {
   }
 
   // 3. Generate and persist
-  const generated = crypto.randomUUID();
+  const generated = crypto.randomBytes(32).toString('hex');
   try {
     fs.mkdirSync(path.dirname(SESSION_SECRET_FILE), { recursive: true });
     fs.writeFileSync(SESSION_SECRET_FILE, generated + '\n', { encoding: 'utf-8', mode: 0o600 });
@@ -89,6 +95,10 @@ function getOrCreateSessionSecret(): string {
 }
 
 export const WEB_SESSION_SECRET = getOrCreateSessionSecret();
+
+// Proxy trust configuration
+// Set TRUST_PROXY=true when behind a reverse proxy (nginx, Cloudflare, etc.)
+export const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 
 // Login rate limiting
 const _maxAttempts = parseInt(process.env.MAX_LOGIN_ATTEMPTS || '5', 10);

@@ -16,6 +16,7 @@ import {
   createInitialAdminUser,
   createUserSession,
   deleteUserSession,
+  deleteUserSessionsByUserId,
   updateUserFields,
   getUserSessions,
   getUserCount,
@@ -42,7 +43,7 @@ import {
 } from '../auth.js';
 import type { AuthUser, UserPublic } from '../types.js';
 import { lastActiveCache } from '../web-context.js';
-import { MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_MINUTES } from '../config.js';
+import { MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_MINUTES, SESSION_COOKIE_NAME } from '../config.js';
 
 const authRoutes = new Hono<{ Variables: Variables }>();
 
@@ -50,12 +51,12 @@ const authRoutes = new Hono<{ Variables: Variables }>();
 
 export function setSessionCookie(token: string): string {
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  return `happyclaw_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}${secure}`;
+  return `${SESSION_COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}${secure}`;
 }
 
 export function clearSessionCookie(): string {
   const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  return `happyclaw_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`;
+  return `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`;
 }
 
 export function isUsernameConflictError(err: unknown): boolean {
@@ -222,46 +223,35 @@ authRoutes.post('/login', async (c) => {
   }
 
   const user = getUserByUsername(username);
-  if (!user) {
-    logAuthEvent({
-      event_type: 'login_failed',
-      username,
-      ip_address: ip,
-      user_agent: ua,
-      details: { reason: 'user_not_found' },
-    });
-    return c.json({ error: 'Invalid credentials' }, 401);
-  }
 
-  if (user.status !== 'active') {
-    logAuthEvent({
-      event_type: 'login_failed',
-      username,
-      ip_address: ip,
-      user_agent: ua,
-      details: {
-        reason:
-          user.status === 'deleted' ? 'account_deleted' : 'account_disabled',
-      },
-    });
-    return c.json(
-      {
-        error:
-          user.status === 'deleted' ? 'Account deleted' : 'Account disabled',
-      },
-      403,
+  // Constant-time: always run bcrypt compare even if user doesn't exist (prevents timing attacks)
+  // 使用运行时生成的合法 bcrypt hash，确保 bcrypt.compare 不会抛异常
+  const DUMMY_HASH = '$2b$12$GBXvNon/zJbUI4jtleGnP.YX03zXP5eSXjppo7a3vyWEUK/2YwdP.';
+  let passwordMatch: boolean;
+  try {
+    passwordMatch = await verifyPassword(
+      password,
+      user ? user.password_hash : DUMMY_HASH,
     );
+  } catch {
+    // 如果 hash 格式异常，视为不匹配，不泄漏内部错误
+    passwordMatch = false;
   }
 
-  const passwordMatch = await verifyPassword(password, user.password_hash);
-  if (!passwordMatch) {
+  if (!user || user.status !== 'active' || !passwordMatch) {
     recordLoginAttempt(username, ip);
     logAuthEvent({
       event_type: 'login_failed',
       username,
       ip_address: ip,
       user_agent: ua,
-      details: { reason: 'wrong_password' },
+      details: {
+        reason: !user
+          ? 'user_not_found'
+          : user.status !== 'active'
+            ? 'account_inactive'
+            : 'wrong_password',
+      },
     });
     return c.json({ error: 'Invalid credentials' }, 401);
   }
@@ -574,15 +564,43 @@ authRoutes.put('/password', authMiddleware, async (c) => {
     password_hash: newHash,
     must_change_password: false,
   });
+
+  // Revoke all existing sessions for this user
+  deleteUserSessionsByUserId(user.id);
+
+  // Create a fresh session for the current request
+  const now = new Date().toISOString();
+  const ip = getClientIp(c);
+  const ua = c.req.header('user-agent') || null;
+  const newToken = generateSessionToken();
+  createUserSession({
+    id: newToken,
+    user_id: user.id,
+    ip_address: ip,
+    user_agent: ua,
+    created_at: now,
+    expires_at: sessionExpiresAt(),
+    last_active_at: now,
+  });
+
   logAuthEvent({
     event_type: 'password_changed',
     username: user.username,
-    ip_address: getClientIp(c),
-    details: { cleared_force_change: true },
+    ip_address: ip,
+    details: { cleared_force_change: true, sessions_revoked: true },
   });
 
   const updated = getUserById(user.id)!;
-  return c.json({ success: true, user: toUserPublic(updated) });
+  return new Response(
+    JSON.stringify({ success: true, user: toUserPublic(updated) }),
+    {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Set-Cookie': setSessionCookie(newToken),
+      },
+    },
+  );
 });
 
 authRoutes.get('/sessions', authMiddleware, (c) => {
@@ -591,7 +609,7 @@ authRoutes.get('/sessions', authMiddleware, (c) => {
   const sessions = getUserSessions(user.id);
   return c.json({
     sessions: sessions.map((s) => ({
-      id: s.id,
+      shortId: s.id.slice(0, 8),
       ip_address: s.ip_address,
       user_agent: s.user_agent,
       created_at: s.created_at,
@@ -603,13 +621,16 @@ authRoutes.get('/sessions', authMiddleware, (c) => {
 
 authRoutes.delete('/sessions/:id', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
-  const targetSessionId = c.req.param('id');
+  const targetId = c.req.param('id');
   const sessions = getUserSessions(user.id);
-  const target = sessions.find((s) => s.id === targetSessionId);
+  // Support both full token and shortId (first 8 chars) for lookup
+  const target = sessions.find(
+    (s) => s.id === targetId || s.id.slice(0, 8) === targetId,
+  );
   if (!target) return c.json({ error: 'Session not found' }, 404);
 
-  deleteUserSession(targetSessionId);
-  lastActiveCache.delete(targetSessionId);
+  deleteUserSession(target.id);
+  lastActiveCache.delete(target.id);
   logAuthEvent({
     event_type: 'session_revoked',
     username: user.username,

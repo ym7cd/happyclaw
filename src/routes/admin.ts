@@ -56,6 +56,9 @@ import { getClientIp } from '../utils.js';
 
 const adminRoutes = new Hono<{ Variables: Variables }>();
 
+// ISO 8601 日期格式验证正则（审计日志查询 from/to 参数）
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
 // --- Helper function ---
 
 function toUserPublic(u: User): UserPublic {
@@ -533,97 +536,91 @@ adminRoutes.get('/invites', authMiddleware, inviteManageMiddleware, (c) => {
 });
 
 // POST /api/admin/invites - 创建邀请码
-adminRoutes.post('/invites', authMiddleware, inviteManageMiddleware, (c) => {
-  const body = c.req.raw.clone();
-  // Inline parse since this is a small payload
-  return body
-    .json()
-    .then((data: unknown) => {
-      const validation = InviteCreateSchema.safeParse(data || {});
-      if (!validation.success) {
-        return c.json(
-          { error: 'Invalid request', details: validation.error.format() },
-          400,
-        );
-      }
+adminRoutes.post('/invites', authMiddleware, inviteManageMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const validation = InviteCreateSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request', details: validation.error.format() },
+      400,
+    );
+  }
 
-      const actor = c.get('user') as AuthUser;
-      const template = resolveTemplate(validation.data.permission_template);
-      if (
-        template &&
-        validation.data.role !== undefined &&
-        validation.data.role !== template.role
-      ) {
-        return c.json(
-          { error: 'role conflicts with permission_template' },
-          400,
-        );
-      }
+  const actor = c.get('user') as AuthUser;
+  const template = resolveTemplate(validation.data.permission_template);
+  if (
+    template &&
+    validation.data.role !== undefined &&
+    validation.data.role !== template.role
+  ) {
+    return c.json(
+      { error: 'role conflicts with permission_template' },
+      400,
+    );
+  }
 
-      const role = template?.role || validation.data.role || 'member';
-      const permissions = normalizePermissions(
-        validation.data.permissions ??
-          template?.permissions ??
-          (role === 'admin' ? ALL_PERMISSIONS : []),
+  const role = template?.role || validation.data.role || 'member';
+  const permissions = normalizePermissions(
+    validation.data.permissions ??
+      template?.permissions ??
+      (role === 'admin' ? ALL_PERMISSIONS : []),
+  );
+
+  if (actor.role !== 'admin') {
+    if (role === 'admin') {
+      return c.json(
+        { error: 'Forbidden: only admin can create admin invites' },
+        403,
       );
-
-      if (actor.role !== 'admin') {
-        if (role === 'admin') {
-          return c.json(
-            { error: 'Forbidden: only admin can create admin invites' },
-            403,
-          );
-        }
-        const allowed = new Set(actor.permissions);
-        const forbidden = permissions.filter((perm) => !allowed.has(perm));
-        if (forbidden.length > 0) {
-          return c.json(
-            {
-              error: `Forbidden: cannot grant permissions [${forbidden.join(', ')}]`,
-            },
-            403,
-          );
-        }
-      }
-
-      const code = generateInviteCode();
-      const now = new Date().toISOString();
-      const expiresAt = validation.data.expires_in_hours
-        ? new Date(
-            Date.now() + validation.data.expires_in_hours * 60 * 60 * 1000,
-          ).toISOString()
-        : null;
-
-      dbCreateInviteCode({
-        code,
-        created_by: actor.id,
-        role,
-        permission_template:
-          (validation.data.permission_template as
-            | PermissionTemplateKey
-            | undefined) ?? null,
-        permissions,
-        max_uses: validation.data.max_uses ?? 1,
-        used_count: 0,
-        expires_at: expiresAt,
-        created_at: now,
-      });
-
-      logAuthEvent({
-        event_type: 'invite_created',
-        username: actor.username,
-        ip_address: getClientIp(c),
-        details: {
-          code_prefix: code.slice(0, 8),
-          role,
-          permission_template: validation.data.permission_template || null,
-          permissions,
+    }
+    const allowed = new Set(actor.permissions);
+    const forbidden = permissions.filter((perm) => !allowed.has(perm));
+    if (forbidden.length > 0) {
+      return c.json(
+        {
+          error: `Forbidden: cannot grant permissions [${forbidden.join(', ')}]`,
         },
-      });
+        403,
+      );
+    }
+  }
 
-      return c.json({ success: true, code }, 201);
-    })
-    .catch(() => c.json({ error: 'Invalid JSON' }, 400));
+  const code = generateInviteCode();
+  const now = new Date().toISOString();
+  const expiresAt = validation.data.expires_in_hours
+    ? new Date(
+        Date.now() + validation.data.expires_in_hours * 60 * 60 * 1000,
+      ).toISOString()
+    : null;
+
+  dbCreateInviteCode({
+    code,
+    created_by: actor.id,
+    role,
+    permission_template:
+      (validation.data.permission_template as
+        | PermissionTemplateKey
+        | undefined) ?? null,
+    permissions,
+    max_uses: validation.data.max_uses ?? 1,
+    used_count: 0,
+    expires_at: expiresAt,
+    created_at: now,
+  });
+
+  logAuthEvent({
+    event_type: 'invite_created',
+    username: actor.username,
+    ip_address: getClientIp(c),
+    details: {
+      code_prefix: code.slice(0, 8),
+      role,
+      permission_template: validation.data.permission_template || null,
+      permissions,
+    },
+  });
+
+  return c.json({ success: true, code }, 201);
 });
 
 // DELETE /api/admin/invites/:code - 删除邀请码
@@ -660,6 +657,14 @@ adminRoutes.get('/audit-log', authMiddleware, auditViewMiddleware, (c) => {
   const actor_username = c.req.query('actor_username');
   const from = c.req.query('from');
   const to = c.req.query('to');
+
+  if (from && !ISO_DATE_RE.test(from)) {
+    return c.json({ error: 'Invalid "from" date format (expected ISO 8601)' }, 400);
+  }
+  if (to && !ISO_DATE_RE.test(to)) {
+    return c.json({ error: 'Invalid "to" date format (expected ISO 8601)' }, 400);
+  }
+
   const result = queryAuthAuditLogs({
     limit: Number.isFinite(limit) ? Math.min(limit, 500) : 100,
     offset: Number.isFinite(offset) ? offset : 0,
@@ -685,6 +690,14 @@ adminRoutes.get(
     const actor_username = c.req.query('actor_username');
     const from = c.req.query('from');
     const to = c.req.query('to');
+
+    if (from && !ISO_DATE_RE.test(from)) {
+      return c.json({ error: 'Invalid "from" date format (expected ISO 8601)' }, 400);
+    }
+    if (to && !ISO_DATE_RE.test(to)) {
+      return c.json({ error: 'Invalid "to" date format (expected ISO 8601)' }, 400);
+    }
+
     const result = queryAuthAuditLogs({
       limit: Number.isFinite(limit) ? Math.min(limit, 5000) : 2000,
       offset: Number.isFinite(offset) ? offset : 0,

@@ -44,11 +44,66 @@ import {
   matchesBlockedPattern,
 } from '../mount-security.js';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
+import net from 'node:net';
 import { z } from 'zod';
 import { broadcastNewMessage } from '../web.js';
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * 检查 hostname 是否为内网地址（SSRF 防护）。
+ * 拒绝 127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.x, ::1, fd00::, fe80:: 等。
+ */
+function isPrivateHostname(hostname: string): boolean {
+  // localhost 变体
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
+
+  // IPv6: 移除方括号
+  const cleaned = hostname.replace(/^\[|\]$/g, '');
+
+  if (net.isIPv6(cleaned)) {
+    const lower = cleaned.toLowerCase();
+    if (lower === '::1' || lower === '::') return true;
+    // fd00::/8 (unique local) 和 fe80::/10 (link-local)
+    if (lower.startsWith('fd') || lower.startsWith('fe80')) return true;
+    // ::ffff:127.0.0.1 等 IPv4-mapped IPv6
+    if (lower.startsWith('::ffff:')) {
+      const ipv4Part = lower.slice(7);
+      return isPrivateIPv4(ipv4Part);
+    }
+    return false;
+  }
+
+  if (net.isIPv4(cleaned)) {
+    return isPrivateIPv4(cleaned);
+  }
+
+  return false;
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => isNaN(p))) return false;
+  const [a, b] = parts;
+  // 127.0.0.0/8
+  if (a === 127) return true;
+  // 10.0.0.0/8
+  if (a === 10) return true;
+  // 172.16.0.0/12
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  // 192.168.0.0/16
+  if (a === 192 && b === 168) return true;
+  // 169.254.0.0/16 (link-local)
+  if (a === 169 && b === 254) return true;
+  // 0.0.0.0
+  if (a === 0) return true;
+  return false;
+}
 
 const groupRoutes = new Hono<{ Variables: Variables }>();
 
@@ -94,18 +149,37 @@ function buildGroupsPayload(user: AuthUser): Record<
     }
   > = {};
 
+  // 先过滤出要显示的群组 jid
+  const visibleEntries: Array<[string, typeof groups[string]]> = [];
   for (const [jid, group] of Object.entries(groups)) {
     const isMain = group.folder === 'main';
     const isWeb = jid.startsWith('web:');
     const isHost = isHostExecutionGroup(group);
 
-    // 隐藏自动注册到主容器的飞书群组（它们共享主容器会话，不是独立流）
     if (isMain && !isWeb) continue;
-
-    // Non-admin users: skip host groups entirely
     if (isHost && !isAdmin) continue;
 
-    const latest = getMessagesPage(jid, undefined, 1)[0];
+    visibleEntries.push([jid, group]);
+  }
+
+  // 批量获取每个 jid 的最新消息（替代 N+1 逐个查询）
+  const visibleJids = visibleEntries.map(([jid]) => jid);
+  const latestByJid = new Map<string, { content: string; timestamp: string }>();
+  if (visibleJids.length > 0) {
+    // 用 multi 查询获取足够多的消息来覆盖所有 jid
+    const allLatest = getMessagesPageMulti(visibleJids, undefined, visibleJids.length * 3);
+    for (const msg of allLatest) {
+      if (!latestByJid.has(msg.chat_jid)) {
+        latestByJid.set(msg.chat_jid, { content: msg.content, timestamp: msg.timestamp });
+      }
+    }
+  }
+
+  for (const [jid, group] of visibleEntries) {
+    const isMain = group.folder === 'main';
+    const isWeb = jid.startsWith('web:');
+
+    const latest = latestByJid.get(jid);
 
     result[jid] = {
       name: group.name,
@@ -230,10 +304,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
 
   const validation = GroupCreateSchema.safeParse(body);
   if (!validation.success) {
-    return c.json(
-      { error: 'Invalid request body', details: validation.error.format() },
-      400,
-    );
+    return c.json({ error: 'Invalid request body' }, 400);
   }
 
   const name = normalizeGroupName(validation.data.name);
@@ -379,13 +450,33 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     }
   }
 
-  // 验证 init_git_url
+  // 验证 init_git_url（SSRF 防护 + admin 权限）
   if (initGitUrl) {
+    if (!hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions: init_git_url requires admin' },
+        403,
+      );
+    }
     if (initGitUrl.length > 2000) {
       return c.json({ error: 'init_git_url is too long (max 2000 characters)' }, 400);
     }
-    if (!initGitUrl.startsWith('https://')) {
-      return c.json({ error: 'init_git_url must be an HTTPS URL' }, 400);
+
+    let gitUrl: URL;
+    try {
+      gitUrl = new URL(initGitUrl);
+    } catch {
+      return c.json({ error: 'init_git_url is not a valid URL' }, 400);
+    }
+
+    // 仅允许 https 协议（HTTP 明文传输存在中间人攻击风险）
+    if (gitUrl.protocol !== 'https:') {
+      return c.json({ error: 'init_git_url must use https protocol' }, 400);
+    }
+
+    // 阻止内网地址
+    if (isPrivateHostname(gitUrl.hostname)) {
+      return c.json({ error: 'init_git_url must not point to a private/internal address' }, 400);
     }
   }
 
@@ -413,15 +504,14 @@ groupRoutes.post('/', authMiddleware, async (c) => {
 
   try {
     if (initSourcePath) {
-      fs.mkdirSync(groupDir, { recursive: true });
-      fs.cpSync(initSourcePath, groupDir, { recursive: true });
+      await fsp.mkdir(groupDir, { recursive: true });
+      await fsp.cp(initSourcePath, groupDir, { recursive: true });
       logger.info({ folder, source: initSourcePath }, 'Workspace initialized from local directory');
     }
 
     if (initGitUrl) {
-      execFileSync('git', ['clone', '--depth', '1', initGitUrl, groupDir], {
+      await execFileAsync('git', ['clone', '--depth', '1', initGitUrl, groupDir], {
         timeout: 120_000,
-        stdio: 'pipe',
       });
       logger.info({ folder, url: initGitUrl }, 'Workspace initialized from git clone');
     }
@@ -485,7 +575,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   const validation = GroupPatchSchema.safeParse(body);
   if (!validation.success) {
     return c.json(
-      { error: 'Invalid request body', details: validation.error.format() },
+      { error: 'Invalid request body' },
       400,
     );
   }
@@ -729,23 +819,26 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
 groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const group = getRegisteredGroup(jid);
-  if (group) {
-    const authUser = c.get('user') as AuthUser;
-    if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-      return c.json(
-        { error: 'Insufficient permissions for host execution mode' },
-        403,
-      );
-    }
+  if (!group) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
+
+  const authUser = c.get('user') as AuthUser;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
   }
 
   const before = c.req.query('before');
   const after = c.req.query('after');
-  const limit = parseInt(c.req.query('limit') || '50', 10);
+  const limitRaw = parseInt(c.req.query('limit') || '50', 10);
+  const limit = Math.min(Number.isFinite(limitRaw) ? Math.max(1, limitRaw) : 50, 200);
 
   // 主容器合并查询：将 web:main 和所有 feishu:xxx（folder=main）的消息合并展示
   const queryJids = [jid];
-  if (group?.folder === 'main') {
+  if (group.folder === 'main') {
     const allGroups = getAllRegisteredGroups();
     for (const [otherJid, otherGroup] of Object.entries(allGroups)) {
       if (otherJid !== jid && otherGroup.folder === 'main') {
@@ -831,7 +924,7 @@ groupRoutes.put('/:jid/env', authMiddleware, async (c) => {
   const validation = ContainerEnvSchema.safeParse(body);
   if (!validation.success) {
     return c.json(
-      { error: 'Invalid request body', details: validation.error.format() },
+      { error: 'Invalid request body' },
       400,
     );
   }

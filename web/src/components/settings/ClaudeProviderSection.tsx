@@ -3,6 +3,7 @@ import { Loader2, Plus, RefreshCw, Rocket, X } from 'lucide-react';
 
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { api } from '../../api/client';
 import type {
   ClaudeConfigPublic,
@@ -140,9 +141,10 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
     }
   };
 
-  const handleApply = async () => {
-    if (!confirm('这会停止所有会话流的活动容器并清空其待处理队列，是否继续？')) return;
+  const [showApplyConfirm, setShowApplyConfirm] = useState(false);
 
+  const doApply = async () => {
+    setShowApplyConfirm(false);
     setApplying(true);
     setError(null);
     setNotice(null);
@@ -160,6 +162,8 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
       setApplying(false);
     }
   };
+
+  const handleApply = () => setShowApplyConfirm(true);
 
   const addRow = () => setCustomEnvRows((prev) => [...prev, { key: '', value: '' }]);
   const removeRow = (index: number) => setCustomEnvRows((prev) => prev.filter((_, i) => i !== index));
@@ -320,6 +324,17 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
       </div>
 
       <div className="text-xs text-slate-500">最近保存：{updatedAt}</div>
+
+      <ConfirmDialog
+        open={showApplyConfirm}
+        onClose={() => setShowApplyConfirm(false)}
+        onConfirm={doApply}
+        title="应用配置到所有容器"
+        message="这会停止所有会话流的活动容器并清空其待处理队列，是否继续？"
+        confirmText="确认应用"
+        confirmVariant="danger"
+        loading={applying}
+      />
     </div>
   );
 }

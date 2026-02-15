@@ -111,12 +111,14 @@ export function MessageList({ messages, loading, hasMore, onLoadMore }: MessageL
     prevMessageCount.current = messages.length;
   }, [messages, autoScroll]);
 
-  // 初始滚到底部
+  // 初始滚到底部（首次加载完消息后触发）
+  const initialScrollDone = useRef(false);
   useEffect(() => {
-    if (parentRef.current && messages.length > 0) {
+    if (!initialScrollDone.current && parentRef.current && messages.length > 0) {
       parentRef.current.scrollTop = parentRef.current.scrollHeight;
+      initialScrollDone.current = true;
     }
-  }, []);
+  }, [messages.length]);
 
   const scrollToTop = useCallback(() => {
     parentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });

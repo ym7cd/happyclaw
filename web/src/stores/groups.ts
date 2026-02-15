@@ -1,13 +1,8 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import type { GroupInfo } from '../types';
 
-export interface GroupInfo {
-  name: string;
-  folder: string;
-  added_at: string;
-  lastMessage?: string;
-  lastMessageTime?: string;
-}
+export type { GroupInfo };
 
 interface GroupsState {
   groups: Record<string, GroupInfo>;

@@ -50,17 +50,12 @@ export const useMonitorStore = create<MonitorState>((set) => ({
 
   buildDockerImage: async () => {
     set({ building: true, buildResult: null });
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000); // 10 分钟超时
     try {
-      const res = await fetch('/api/docker/build', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-        signal: controller.signal,
-      });
-      const result = await res.json();
+      const result = await api.post<{ success: boolean; error?: string; stdout?: string; stderr?: string }>(
+        '/api/docker/build',
+        {},
+        10 * 60 * 1000, // 10 分钟超时
+      );
       set({ building: false, buildResult: result });
     } catch (err) {
       set({
@@ -70,8 +65,6 @@ export const useMonitorStore = create<MonitorState>((set) => ({
           error: err instanceof Error ? err.message : String(err),
         },
       });
-    } finally {
-      clearTimeout(timeout);
     }
   },
 

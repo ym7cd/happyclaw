@@ -303,7 +303,7 @@ function createPreCompactHook(isMain: boolean): HookCallback {
 function sanitizeFilename(summary: string): string {
   return summary
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 50);
 }
@@ -391,7 +391,6 @@ function shouldClose(): boolean {
  */
 function drainIpcInput(): Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }> {
   try {
-    fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
       .filter(f => f.endsWith('.json'))
       .sort();
@@ -995,8 +994,9 @@ async function main(): Promise<void> {
           process.exit(1);
         }
 
-        // 未超过重试次数，继续下一轮循环（会触发自动压缩）
+        // 未超过重试次数，等待后继续下一轮循环（会触发自动压缩）
         log('Retrying query after context overflow (will trigger auto-compaction)...');
+        await new Promise(r => setTimeout(r, 3000));
         continue;
       }
 

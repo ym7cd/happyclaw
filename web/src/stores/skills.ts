@@ -70,30 +70,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   installSkill: async (pkg: string) => {
     set({ installing: true, error: null });
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60_000);
-      try {
-        const res = await fetch('/api/skills/install', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ package: pkg }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || res.statusText);
-        }
-      } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          throw new Error('安装超时，请稍后重试');
-        }
-        throw err;
-      }
+      await api.post('/api/skills/install', { package: pkg }, 60_000);
       await get().loadSkills();
-    } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+    } catch (err: any) {
+      set({ error: err?.message || (err instanceof Error ? err.message : '安装失败，请稍后重试') });
       throw err;
     } finally {
       set({ installing: false });

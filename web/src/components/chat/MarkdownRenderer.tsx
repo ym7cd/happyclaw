@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { useState } from 'react';
 import { Copy, Check } from 'lucide-react';
 import 'highlight.js/styles/github.css';
@@ -59,63 +60,76 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   );
 }
 
+/** Allow class names on code/span elements so rehype-highlight styles survive sanitization */
+const sanitizeSchema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [...(defaultSchema.attributes?.code || []), 'className'],
+    span: [...(defaultSchema.attributes?.span || []), 'className'],
+  },
+};
+
+/** Code block / inline code renderer extracted from MarkdownRenderer */
+function CodeBlock({ className, children, ...props }: React.ComponentPropsWithoutRef<'code'> & { className?: string }) {
+  const [copied, setCopied] = useState(false);
+  const match = /language-(\w+)/.exec(className || '');
+  const isBlock = Boolean(match);
+  const codeString = String(children).replace(/\n$/, '');
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(codeString);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (isBlock) {
+    return (
+      <div className="relative group my-4">
+        <div className="absolute right-2 top-2 opacity-70 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={handleCopy}
+            className="p-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs flex items-center gap-1"
+          >
+            {copied ? (
+              <>
+                <Check size={14} />
+                已复制
+              </>
+            ) : (
+              <>
+                <Copy size={14} />
+                复制
+              </>
+            )}
+          </button>
+        </div>
+        <pre className="!bg-[#f6f8fa] rounded-lg p-4 overflow-x-auto">
+          <code className={className} {...props}>
+            {children}
+          </code>
+        </pre>
+      </div>
+    );
+  }
+
+  return (
+    <code
+      className="bg-brand-50 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
+      {...props}
+    >
+      {children}
+    </code>
+  );
+}
+
 export function MarkdownRenderer({ content }: MarkdownRendererProps) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeHighlight]}
+      rehypePlugins={[rehypeHighlight, [rehypeSanitize, sanitizeSchema]]}
       components={{
-        code: ({ className, children, ...props }) => {
-          const [copied, setCopied] = useState(false);
-          const match = /language-(\w+)/.exec(className || '');
-          const isBlock = Boolean(match);
-          const codeString = String(children).replace(/\n$/, '');
-
-          const handleCopy = () => {
-            navigator.clipboard.writeText(codeString);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-          };
-
-          if (isBlock) {
-            return (
-              <div className="relative group my-4">
-                <div className="absolute right-2 top-2 opacity-70 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={handleCopy}
-                    className="p-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs flex items-center gap-1"
-                  >
-                    {copied ? (
-                      <>
-                        <Check size={14} />
-                        已复制
-                      </>
-                    ) : (
-                      <>
-                        <Copy size={14} />
-                        复制
-                      </>
-                    )}
-                  </button>
-                </div>
-                <pre className="!bg-[#f6f8fa] rounded-lg p-4 overflow-x-auto">
-                  <code className={className} {...props}>
-                    {children}
-                  </code>
-                </pre>
-              </div>
-            );
-          }
-
-          return (
-            <code
-              className="bg-brand-50 text-primary px-1.5 py-0.5 rounded text-sm font-mono"
-              {...props}
-            >
-              {children}
-            </code>
-          );
-        },
+        code: CodeBlock,
         img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
         a: ({ href, children }) => (
           <a

@@ -1,12 +1,12 @@
 /**
  * Mount Security Module for happyclaw
  *
- * Validates additional mounts against an allowlist stored OUTSIDE the project root.
- * This prevents container agents from modifying security configuration.
+ * Validates additional mounts against an allowlist stored in the project config/ directory.
  *
- * Allowlist location: ~/.config/happyclaw/mount-allowlist.json
+ * Allowlist location: config/mount-allowlist.json
  */
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { MOUNT_ALLOWLIST_PATH } from './config.js';
@@ -116,7 +116,7 @@ export function loadMountAllowlist(): MountAllowlist | null {
  * Expand ~ to home directory and resolve to absolute path
  */
 export function expandPath(p: string): string {
-  const homeDir = process.env.HOME || '/Users/user';
+  const homeDir = os.homedir();
   if (p.startsWith('~/')) {
     return path.join(homeDir, p.slice(2));
   }
@@ -148,16 +148,11 @@ export function matchesBlockedPattern(
   const pathParts = realPath.split(path.sep);
 
   for (const pattern of blockedPatterns) {
-    // Check if any path component matches the pattern
+    // Check if any path component exactly matches the pattern
     for (const part of pathParts) {
-      if (part === pattern || part.includes(pattern)) {
+      if (part === pattern) {
         return pattern;
       }
-    }
-
-    // Also check if the full path contains the pattern
-    if (realPath.includes(pattern)) {
-      return pattern;
     }
   }
 

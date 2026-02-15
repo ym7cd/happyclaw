@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { useUsersStore } from '../../stores/users';
 import { getErrorMessage } from './utils';
+import { withBasePath } from '../../utils/url';
 
 interface AuditLogTabProps {
   setError: (value: string | null) => void;
@@ -41,7 +42,7 @@ export function AuditLogTab({ setError }: AuditLogTabProps) {
     if (eventType !== 'all') params.set('event_type', eventType);
     if (username.trim()) params.set('username', username.trim());
     if (actorUsername.trim()) params.set('actor_username', actorUsername.trim());
-    return `/api/admin/audit-log/export?${params.toString()}`;
+    return withBasePath(`/api/admin/audit-log/export?${params.toString()}`);
   }, [actorUsername, eventType, limit, username]);
 
   return (

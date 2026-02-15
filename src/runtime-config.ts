@@ -863,6 +863,9 @@ export interface ContainerEnvPublicConfig {
 }
 
 function containerEnvPath(folder: string): string {
+  if (folder.includes('..') || folder.includes('/')) {
+    throw new Error('Invalid folder name');
+  }
   return path.join(CONTAINER_ENV_DIR, `${folder}.json`);
 }
 
@@ -904,6 +907,10 @@ export function saveContainerEnvConfig(
   if (sanitized.customEnv) {
     const cleanEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(sanitized.customEnv)) {
+      if (DANGEROUS_ENV_VARS.has(k)) {
+        logger.warn({ key: k }, 'Rejected dangerous env variable in saveContainerEnvConfig');
+        continue;
+      }
       cleanEnv[k] = sanitizeEnvValue(v);
     }
     sanitized.customEnv = cleanEnv;

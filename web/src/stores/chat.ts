@@ -1,19 +1,9 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 import { useFileStore } from './files';
+import type { GroupInfo } from '../types';
 
-export interface GroupInfo {
-  name: string;
-  folder: string;
-  added_at: string;
-  kind?: 'main' | 'feishu' | 'web';
-  editable?: boolean;
-  deletable?: boolean;
-  lastMessage?: string;
-  lastMessageTime?: string;
-  execution_mode?: 'container' | 'host';
-  custom_cwd?: string;
-}
+export type { GroupInfo };
 
 export interface Message {
   id: string;
@@ -90,6 +80,18 @@ function mergeMessagesChronologically(
   });
 }
 
+const MAX_THINKING_CACHE_SIZE = 500;
+
+/** Evict oldest entries when cache exceeds capacity (relies on insertion order) */
+function capThinkingCache(cache: Record<string, string>): Record<string, string> {
+  const keys = Object.keys(cache);
+  if (keys.length <= MAX_THINKING_CACHE_SIZE) return cache;
+  const keep = keys.slice(keys.length - MAX_THINKING_CACHE_SIZE);
+  const next: Record<string, string> = {};
+  for (const k of keep) next[k] = cache[k];
+  return next;
+}
+
 function retainThinkingCacheForMessages(
   messagesByGroup: Record<string, Message[]>,
   cache: Record<string, string>,
@@ -103,7 +105,7 @@ function retainThinkingCacheForMessages(
   for (const [messageId, content] of Object.entries(cache)) {
     if (aliveMessageIds.has(messageId)) next[messageId] = content;
   }
-  return next;
+  return capThinkingCache(next);
 }
 
 interface ChatState {
@@ -255,7 +257,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               .reverse()
               .find((m) => m.is_from_me && m.sender !== '__system__');
             if (lastAiMsg) {
-              nextThinkingCache = { ...s.thinkingCache, [lastAiMsg.id]: s.pendingThinking[jid] };
+              nextThinkingCache = capThinkingCache({ ...s.thinkingCache, [lastAiMsg.id]: s.pendingThinking[jid] });
               const { [jid]: _, ...restPending } = s.pendingThinking;
               nextPendingThinking = restPending;
             }
@@ -656,7 +658,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           waiting: { ...s.waiting, [chatJid]: false },
           streaming: nextStreaming,
           pendingThinking: nextPending,
-          ...(thinkingText ? { thinkingCache: { ...s.thinkingCache, [msg.id]: thinkingText } } : {}),
+          ...(thinkingText ? { thinkingCache: capThinkingCache({ ...s.thinkingCache, [msg.id]: thinkingText }) } : {}),
         };
       }
 

@@ -29,7 +29,7 @@ const ackReactionByChat = new Map<string, string>();
 const typingReactionByChat = new Map<string, string>();
 
 let client: lark.Client;
-let wsClient: lark.WSClient;
+let wsClient: lark.WSClient | null = null;
 
 /**
  * Check if a message ID has been seen recently (deduplication).
@@ -54,6 +54,7 @@ function isDuplicate(msgId: string): boolean {
  * Mark a message as seen.
  */
 function markSeen(msgId: string): void {
+  msgCache.delete(msgId);
   msgCache.set(msgId, Date.now());
 }
 
@@ -636,5 +637,6 @@ export async function stopFeishu(): Promise<void> {
     } catch (err) {
       logger.warn({ err }, 'Error stopping Feishu client');
     }
+    wsClient = null;
   }
 }

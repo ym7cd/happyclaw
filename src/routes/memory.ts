@@ -148,6 +148,20 @@ function readMemoryFile(relativePath: string): MemoryFilePayload {
   };
 }
 
+// 记忆路径中禁止写入的系统子目录（CLAUDE.md 除外，它是记忆文件）
+const MEMORY_BLOCKED_DIRS = ['logs', '.claude', 'conversations'];
+
+function isBlockedMemoryPath(normalizedPath: string): boolean {
+  const parts = normalizedPath.split('/');
+  // 路径格式: groups/{folder}/{subpath...} 或 data/memory/{folder}/{subpath...}
+  // 检查 groups/{folder}/ 下的系统子目录
+  if (parts[0] === 'groups' && parts.length >= 3) {
+    const subPath = parts[2];
+    if (MEMORY_BLOCKED_DIRS.includes(subPath)) return true;
+  }
+  return false;
+}
+
 function writeMemoryFile(
   relativePath: string,
   content: string,
@@ -156,6 +170,9 @@ function writeMemoryFile(
   const { absolutePath, writable } = resolveMemoryPath(normalized);
   if (!writable) {
     throw new Error('Memory file is read-only');
+  }
+  if (isBlockedMemoryPath(normalized)) {
+    throw new Error('Cannot write to system path');
   }
   if (Buffer.byteLength(content, 'utf-8') > MAX_MEMORY_FILE_LENGTH) {
     throw new Error('Memory file is too large');

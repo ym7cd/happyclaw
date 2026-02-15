@@ -74,21 +74,37 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
   }, [groupJid, hasMessages, loadMessages]);
 
   // Poll for new messages — use setTimeout recursion to avoid request piling up
+  // Pauses when the page is not visible to save resources
   useEffect(() => {
     let active = true;
+
+    const schedulePoll = () => {
+      if (!active || document.hidden) return;
+      pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
+    };
+
     const poll = async () => {
       if (!active) return;
       try {
         await refreshMessages(groupJid);
       } catch { /* handled in store */ }
-      if (active) {
-        pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
+      schedulePoll();
+    };
+
+    const handleVisibility = () => {
+      if (!document.hidden && active) {
+        // Resume polling immediately when page becomes visible
+        if (pollRef.current) clearTimeout(pollRef.current);
+        poll();
       }
     };
-    pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    schedulePoll();
 
     return () => {
       active = false;
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (pollRef.current) clearTimeout(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -14,10 +14,11 @@ import {
 import { isSessionExpired } from '../auth.js';
 import type { AuthUser, Permission } from '../types.js';
 import { hasPermission } from '../permissions.js';
+import { SESSION_COOKIE_NAME } from '../config.js';
 
 export const authMiddleware = async (c: any, next: any) => {
   const cookies = parseCookie(c.req.header('cookie'));
-  const token = cookies.happyclaw_session;
+  const token = cookies[SESSION_COOKIE_NAME];
   if (!token) {
     return c.json({ error: 'Unauthorized' }, 401);
   }

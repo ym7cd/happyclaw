@@ -6,8 +6,7 @@ export interface AdditionalMount {
 
 /**
  * Mount Allowlist - Security configuration for additional mounts
- * This file should be stored at ~/.config/happyclaw/mount-allowlist.json
- * and is NOT mounted into any container, making it tamper-proof from agents.
+ * Stored at config/mount-allowlist.json in the project root.
  */
 export interface MountAllowlist {
   // Directories that can be mounted into containers

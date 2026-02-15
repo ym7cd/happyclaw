@@ -233,22 +233,24 @@ export function initDatabase(): void {
       .get() as { cnt: number }
   ).cnt > 0;
   if (hasUniqueFolder) {
-    db.exec(`
-      CREATE TABLE registered_groups_new (
-        jid TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        folder TEXT NOT NULL,
-        added_at TEXT NOT NULL,
-        container_config TEXT,
-        execution_mode TEXT DEFAULT 'container',
-        custom_cwd TEXT,
-        init_source_path TEXT,
-        init_git_url TEXT
-      );
-      INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL FROM registered_groups;
-      DROP TABLE registered_groups;
-      ALTER TABLE registered_groups_new RENAME TO registered_groups;
-    `);
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE registered_groups_new (
+          jid TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          folder TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          container_config TEXT,
+          execution_mode TEXT DEFAULT 'container',
+          custom_cwd TEXT,
+          init_source_path TEXT,
+          init_git_url TEXT
+        );
+        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL FROM registered_groups;
+        DROP TABLE registered_groups;
+        ALTER TABLE registered_groups_new RENAME TO registered_groups;
+      `);
+    })();
   }
 
   assertSchema('messages', [
@@ -337,6 +339,12 @@ export function initDatabase(): void {
     'details',
     'created_at',
   ]);
+
+  // Store schema version after all migrations complete
+  const SCHEMA_VERSION = '10';
+  db.prepare(
+    'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
+  ).run('schema_version', SCHEMA_VERSION);
 }
 
 /**

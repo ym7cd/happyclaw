@@ -641,7 +641,14 @@ export async function runContainerAgent(
             });
           })
           .catch((err) => {
-            logger.error({ group: group.name, err }, 'onOutput callback error');
+            const errMsg =
+              err instanceof Error ? err.message : String(err);
+            logger.error({ group: group.name, err: errMsg }, 'onOutput callback error');
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Container output callback failed: ${errMsg}`,
+            });
           });
         return;
       }

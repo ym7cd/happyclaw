@@ -21,7 +21,13 @@ import {
 } from './web-context.js';
 
 // Schemas
-import { MessageCreateSchema } from './schemas.js';
+import {
+  MessageCreateSchema,
+  TerminalStartSchema,
+  TerminalInputSchema,
+  TerminalResizeSchema,
+  TerminalStopSchema,
+} from './schemas.js';
 
 // Middleware
 import { authMiddleware } from './middleware/auth.js';
@@ -49,7 +55,7 @@ import {
 } from './db.js';
 import { isSessionExpired } from './auth.js';
 import type { NewMessage, WsMessageOut, WsMessageIn, AuthUser, StreamEvent } from './types.js';
-import { WEB_PORT } from './config.js';
+import { WEB_PORT, SESSION_COOKIE_NAME } from './config.js';
 import { logger } from './logger.js';
 
 // --- App Setup ---
@@ -78,18 +84,19 @@ function releaseTerminalOwnership(ws: WebSocket, groupJid: string): void {
 
 // --- CORS Middleware ---
 const CORS_ALLOWED_ORIGINS = process.env.CORS_ALLOWED_ORIGINS || '';
+const CORS_ALLOW_LOCALHOST = process.env.CORS_ALLOW_LOCALHOST !== 'false'; // default: true
 
 function isAllowedOrigin(origin: string | undefined): string | null {
   if (!origin) return null; // same-origin requests
   // 环境变量设为 '*' 时允许所有来源
   if (CORS_ALLOWED_ORIGINS === '*') return origin;
-  // 允许 localhost / 127.0.0.1 的任意端口（开发 & 自托管场景）
-  try {
-    const url = new URL(origin);
-    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return origin;
-  } catch { /* invalid origin */ }
-  // 允许同端口访问
-  if (origin === `http://localhost:${WEB_PORT}`) return origin;
+  // 允许 localhost / 127.0.0.1 的任意端口（开发 & 自托管场景，可通过 CORS_ALLOW_LOCALHOST=false 关闭）
+  if (CORS_ALLOW_LOCALHOST) {
+    try {
+      const url = new URL(origin);
+      if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return origin;
+    } catch { /* invalid origin */ }
+  }
   // 自定义白名单（逗号分隔）
   if (CORS_ALLOWED_ORIGINS) {
     const allowed = CORS_ALLOWED_ORIGINS.split(',').map((s) => s.trim());
@@ -275,7 +282,7 @@ function setupWebSocket(server: any): void {
 
     // Verify session cookie
     const cookies = parseCookie(request.headers.cookie);
-    const token = cookies.happyclaw_session;
+    const token = cookies[SESSION_COOKIE_NAME];
     if (!token) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -397,7 +404,18 @@ function setupWebSocket(server: any): void {
 
         else if (msg.type === 'terminal_start') {
           try {
-            const chatJid = typeof msg.chatJid === 'string' ? msg.chatJid.trim() : '';
+            // Admin 权限检查
+            if (session.role !== 'admin') {
+              ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid || '', error: '终端操作需要管理员权限' }));
+              return;
+            }
+            // Schema 验证
+            const startValidation = TerminalStartSchema.safeParse(msg);
+            if (!startValidation.success) {
+              ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid || '', error: '终端启动参数无效' }));
+              return;
+            }
+            const chatJid = startValidation.data.chatJid.trim();
             if (!chatJid) {
               ws.send(JSON.stringify({ type: 'terminal_error', chatJid: '', error: 'chatJid 无效' }));
               return;
@@ -499,37 +517,47 @@ function setupWebSocket(server: any): void {
         }
 
         else if (msg.type === 'terminal_input') {
+          const inputValidation = TerminalInputSchema.safeParse(msg);
+          if (!inputValidation.success) {
+            ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid || '', error: '终端输入参数无效' }));
+            return;
+          }
           const ownerJid = wsTerminals.get(ws);
-          if (ownerJid !== msg.chatJid || terminalOwners.get(msg.chatJid) !== ws) {
-            ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid, error: '终端会话已失效' }));
+          if (ownerJid !== inputValidation.data.chatJid || terminalOwners.get(inputValidation.data.chatJid) !== ws) {
+            ws.send(JSON.stringify({ type: 'terminal_error', chatJid: inputValidation.data.chatJid, error: '终端会话已失效' }));
             return;
           }
-          if (typeof msg.data !== 'string' || msg.data.length === 0 || msg.data.length > 8192) {
-            ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid, error: '终端输入无效' }));
-            return;
-          }
-          terminalManager.write(msg.chatJid, msg.data);
+          terminalManager.write(inputValidation.data.chatJid, inputValidation.data.data);
         }
 
         else if (msg.type === 'terminal_resize') {
-          const ownerJid = wsTerminals.get(ws);
-          if (ownerJid !== msg.chatJid || terminalOwners.get(msg.chatJid) !== ws) {
-            ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid, error: '终端会话已失效' }));
+          const resizeValidation = TerminalResizeSchema.safeParse(msg);
+          if (!resizeValidation.success) {
+            ws.send(JSON.stringify({ type: 'terminal_error', chatJid: msg.chatJid || '', error: '终端调整参数无效' }));
             return;
           }
-          const cols = normalizeTerminalSize(msg.cols, 80, 20, 300);
-          const rows = normalizeTerminalSize(msg.rows, 24, 8, 120);
-          terminalManager.resize(msg.chatJid, cols, rows);
+          const ownerJid = wsTerminals.get(ws);
+          if (ownerJid !== resizeValidation.data.chatJid || terminalOwners.get(resizeValidation.data.chatJid) !== ws) {
+            ws.send(JSON.stringify({ type: 'terminal_error', chatJid: resizeValidation.data.chatJid, error: '终端会话已失效' }));
+            return;
+          }
+          const cols = normalizeTerminalSize(resizeValidation.data.cols, 80, 20, 300);
+          const rows = normalizeTerminalSize(resizeValidation.data.rows, 24, 8, 120);
+          terminalManager.resize(resizeValidation.data.chatJid, cols, rows);
         }
 
         else if (msg.type === 'terminal_stop') {
-          const ownerJid = wsTerminals.get(ws);
-          if (ownerJid !== msg.chatJid || terminalOwners.get(msg.chatJid) !== ws) {
+          const stopValidation = TerminalStopSchema.safeParse(msg);
+          if (!stopValidation.success) {
             return;
           }
-          terminalManager.stop(msg.chatJid);
-          releaseTerminalOwnership(ws, msg.chatJid);
-          ws.send(JSON.stringify({ type: 'terminal_stopped', chatJid: msg.chatJid, reason: '用户关闭终端' }));
+          const ownerJid = wsTerminals.get(ws);
+          if (ownerJid !== stopValidation.data.chatJid || terminalOwners.get(stopValidation.data.chatJid) !== ws) {
+            return;
+          }
+          terminalManager.stop(stopValidation.data.chatJid);
+          releaseTerminalOwnership(ws, stopValidation.data.chatJid);
+          ws.send(JSON.stringify({ type: 'terminal_stopped', chatJid: stopValidation.data.chatJid, reason: '用户关闭终端' }));
         }
       } catch (err) {
         logger.error({ err }, 'Error handling WebSocket message');

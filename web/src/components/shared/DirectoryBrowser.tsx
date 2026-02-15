@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { Folder, FolderPlus, ChevronRight, ArrowLeft, Loader2, FolderCheck } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { api } from '../../api/client';
 
 interface DirectoryEntry {
   name: string;
@@ -39,17 +40,12 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
       const url = targetPath
         ? `/api/browse/directories?path=${encodeURIComponent(targetPath)}`
         : '/api/browse/directories';
-      const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `HTTP ${res.status}`);
-      }
-      const data: BrowseResponse = await res.json();
+      const data = await api.get<BrowseResponse>(url);
       setCurrentPath(data.currentPath);
       setParentPath(data.parentPath);
       setDirectories(data.directories);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load directories');
+    } catch (err: any) {
+      setError(err?.message || (err instanceof Error ? err.message : 'Failed to load directories'));
     } finally {
       setLoading(false);
     }
@@ -97,23 +93,13 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
 
     setCreateLoading(true);
     try {
-      const res = await fetch('/api/browse/directories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ parentPath: currentPath, name }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `HTTP ${res.status}`);
-      }
-      const created: DirectoryEntry = await res.json();
+      const created = await api.post<DirectoryEntry>('/api/browse/directories', { parentPath: currentPath, name });
       onChange(created.path);
       setBrowsing(false);
       setCreating(false);
       setNewFolderName('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create folder');
+    } catch (err: any) {
+      setError(err?.message || (err instanceof Error ? err.message : 'Failed to create folder'));
     } finally {
       setCreateLoading(false);
     }
