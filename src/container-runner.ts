@@ -22,6 +22,7 @@ import {
   getContainerEnvConfig,
 } from './runtime-config.js';
 import { RegisteredGroup, StreamEvent } from './types.js';
+import { getUserById } from './db.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---HAPPYCLAW_OUTPUT_START---';
@@ -64,6 +65,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  mountUserSkills = true,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const homeDir = getHomeDir();
@@ -162,9 +164,10 @@ function buildVolumeMounts(
       readonly: true,
     });
   }
-  // User-level skills (higher priority — symlinked after project skills in entrypoint)
+  // User-level skills (admin only — ~/.claude/skills/ contains admin's personal skills)
+  // Non-admin groups should not have access to admin's skills
   const userSkillsDir = path.join(homeDir, '.claude', 'skills');
-  if (fs.existsSync(userSkillsDir)) {
+  if (mountUserSkills && fs.existsSync(userSkillsDir)) {
     mounts.push({
       hostPath: userSkillsDir,
       containerPath: '/workspace/user-skills',
@@ -267,7 +270,14 @@ export async function runContainerAgent(
   const groupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  // User-level skills (~/.claude/skills/) are admin-only:
+  // main session is always admin; for other groups, check creator's role
+  let shouldMountUserSkills = input.isMain;
+  if (!shouldMountUserSkills && group.created_by) {
+    const creator = getUserById(group.created_by);
+    shouldMountUserSkills = creator?.role === 'admin';
+  }
+  const mounts = buildVolumeMounts(group, input.isMain, shouldMountUserSkills);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `happyclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);

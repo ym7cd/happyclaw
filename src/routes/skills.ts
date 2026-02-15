@@ -7,6 +7,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { Variables } from '../web-context.js';
+import type { AuthUser } from '../types.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 
 const execFileAsync = promisify(execFile);
@@ -269,7 +270,12 @@ function getSkillDetail(skillId: string): SkillDetail | null {
 // --- Routes ---
 
 skillsRoutes.get('/', authMiddleware, (c) => {
-  const skills = discoverSkills();
+  const authUser = c.get('user') as AuthUser;
+  const allSkills = discoverSkills();
+  // User-level skills (~/.claude/skills/) are admin-only
+  const skills = authUser.role === 'admin'
+    ? allSkills
+    : allSkills.filter((s) => s.source !== 'user');
   return c.json({ skills });
 });
 
@@ -278,6 +284,12 @@ skillsRoutes.get('/:id', authMiddleware, (c) => {
   const skill = getSkillDetail(id);
 
   if (!skill) {
+    return c.json({ error: 'Skill not found' }, 404);
+  }
+
+  // User-level skills (~/.claude/skills/) are admin-only
+  const authUser = c.get('user') as AuthUser;
+  if (skill.source === 'user' && authUser.role !== 'admin') {
     return c.json({ error: 'Skill not found' }, 404);
   }
 

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useMonitorStore } from '../stores/monitor';
+import { useAuthStore } from '../stores/auth';
 import { ContainerStatus } from '../components/monitor/ContainerStatus';
 import { QueueStatus } from '../components/monitor/QueueStatus';
 import { SystemInfo } from '../components/monitor/SystemInfo';
@@ -11,6 +12,7 @@ import { Button } from '@/components/ui/button';
 
 export function MonitorPage() {
   const { status, loading, loadStatus, building, buildResult, buildDockerImage, clearBuildResult } = useMonitorStore();
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
 
   useEffect(() => {
     loadStatus();
@@ -68,7 +70,11 @@ export function MonitorPage() {
                     </>
                   )}
                 </div>
-                <Button onClick={handleBuild} disabled={building}>
+                <Button
+                  onClick={handleBuild}
+                  disabled={building || !isAdmin}
+                  title={!isAdmin ? '仅管理员可构建镜像' : undefined}
+                >
                   {building ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />

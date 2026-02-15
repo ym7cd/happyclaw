@@ -9,4 +9,5 @@ export interface GroupInfo {
   lastMessageTime?: string;
   execution_mode?: 'container' | 'host';
   custom_cwd?: string;
+  created_by?: string;
 }

@@ -1,9 +1,15 @@
 // Shared state and utilities for web server
 
 import { WebSocket } from 'ws';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, UserRole } from './types.js';
 import { GroupQueue } from './group-queue.js';
 import type { AuthUser, NewMessage, MessageCursor } from './types.js';
+
+export interface WsClientInfo {
+  sessionId: string;
+  userId: string;
+  role: UserRole;
+}
 
 export interface WebDeps {
   queue: GroupQueue;
@@ -27,7 +33,7 @@ export type Variables = {
 };
 
 let deps: WebDeps | null = null;
-export const wsClients = new Map<WebSocket, string>();
+export const wsClients = new Map<WebSocket, WsClientInfo>();
 export const MAX_GROUP_NAME_LEN = 40;
 
 export function setWebDeps(d: WebDeps): void {
@@ -73,4 +79,35 @@ export function isHostExecutionGroup(group: RegisteredGroup): boolean {
 
 export function hasHostExecutionPermission(user: AuthUser): boolean {
   return user.role === 'admin';
+}
+
+/**
+ * Check if a user can access (view messages, send messages to) a group.
+ * - admin → always true
+ * - Feishu groups (jid does not start with 'web:') → true (visible to all)
+ * - folder === 'main' → false for non-admin
+ * - Web groups → only if created_by matches user.id (null created_by = admin-only)
+ */
+export function canAccessGroup(
+  user: { id: string; role: UserRole },
+  group: RegisteredGroup & { jid: string },
+): boolean {
+  if (user.role === 'admin') return true;
+  if (!group.jid.startsWith('web:')) return true;
+  if (group.folder === 'main') return false;
+  return group.created_by === user.id;
+}
+
+/**
+ * Check if a user can modify (rename, delete, reset) a group.
+ * Same as canAccessGroup, but Feishu groups are NOT modifiable by non-admin.
+ */
+export function canModifyGroup(
+  user: { id: string; role: UserRole },
+  group: RegisteredGroup & { jid: string },
+): boolean {
+  if (user.role === 'admin') return true;
+  if (!group.jid.startsWith('web:')) return false;
+  if (group.folder === 'main') return false;
+  return group.created_by === user.id;
 }

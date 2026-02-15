@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 import { useFileStore } from './files';
+import { useAuthStore } from './auth';
 import type { GroupInfo } from '../types';
 
 export type { GroupInfo };
@@ -298,11 +299,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.post<{ success: boolean; messageId: string; timestamp: string }>('/api/messages', body);
       if (data.success) {
         // Add user message to local state immediately
+        const authState = useAuthStore.getState();
+        const sender = authState.user?.id || 'web-user';
+        const senderName = authState.user?.display_name || authState.user?.username || 'Web';
         const msg: Message = {
           id: data.messageId,
           chat_jid: jid,
-          sender: 'web-user',
-          sender_name: 'Web',
+          sender,
+          sender_name: senderName,
           content,
           // Use server timestamp so incremental polling cursor stays monotonic with backend data.
           timestamp: data.timestamp,

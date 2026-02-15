@@ -13,34 +13,23 @@ import {
   deleteTask,
   getTaskRunLogs,
   getRegisteredGroup,
-  getAllRegisteredGroups,
 } from '../db.js';
-import type { AuthUser, ScheduledTask, RegisteredGroup } from '../types.js';
-import { isHostExecutionGroup, hasHostExecutionPermission } from '../web-context.js';
+import type { AuthUser } from '../types.js';
+import { isHostExecutionGroup, hasHostExecutionPermission, canAccessGroup } from '../web-context.js';
 
 const tasksRoutes = new Hono<{ Variables: Variables }>();
-
-// --- Utility Functions ---
-
-function resolveGroupForTask(task: Pick<ScheduledTask, 'chat_jid' | 'group_folder'>): RegisteredGroup | undefined {
-  const direct = getRegisteredGroup(task.chat_jid);
-  if (direct && direct.folder === task.group_folder) return direct;
-  const allGroups = getAllRegisteredGroups();
-  return Object.values(allGroups).find(
-    (group) => group.folder === task.group_folder,
-  ) as RegisteredGroup | undefined;
-}
 
 // --- Routes ---
 
 tasksRoutes.get('/', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
   const tasks = getAllTasks().filter((task) => {
-    const group = resolveGroupForTask(task);
-    // Conservative: if group can't be resolved, only admin can see (may be orphaned host task)
-    if (!group) return hasHostExecutionPermission(authUser);
-    if (!isHostExecutionGroup(group)) return true;
-    return hasHostExecutionPermission(authUser);
+    const group = getRegisteredGroup(task.chat_jid);
+    // Conservative: if group can't be resolved, only admin can see (may be orphaned task)
+    if (!group) return authUser.role === 'admin';
+    if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) return false;
+    if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) return false;
+    return true;
   });
   return c.json({ tasks });
 });
@@ -73,6 +62,9 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     );
   }
   const authUser = c.get('user') as AuthUser;
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -94,6 +86,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     next_run: now,
     status: 'active',
     created_at: now,
+    created_by: authUser.id,
   });
 
   return c.json({ success: true, taskId });
@@ -104,13 +97,19 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = resolveGroupForTask(existing);
-  // Conservative: unresolvable group tasks require admin (may be orphaned host tasks)
-  if ((!group || isHostExecutionGroup(group)) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
+  const group = getRegisteredGroup(existing.chat_jid);
+  if (!group) {
+    if (authUser.role !== 'admin') return c.json({ error: 'Task not found' }, 404);
+  } else {
+    if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+      return c.json({ error: 'Task not found' }, 404);
+    }
+    if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions for host execution mode' },
+        403,
+      );
+    }
   }
   const body = await c.req.json().catch(() => ({}));
 
@@ -132,12 +131,19 @@ tasksRoutes.delete('/:id', authMiddleware, (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = resolveGroupForTask(existing);
-  if ((!group || isHostExecutionGroup(group)) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
+  const group = getRegisteredGroup(existing.chat_jid);
+  if (!group) {
+    if (authUser.role !== 'admin') return c.json({ error: 'Task not found' }, 404);
+  } else {
+    if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+      return c.json({ error: 'Task not found' }, 404);
+    }
+    if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions for host execution mode' },
+        403,
+      );
+    }
   }
   deleteTask(id);
   return c.json({ success: true });
@@ -148,12 +154,19 @@ tasksRoutes.get('/:id/logs', authMiddleware, (c) => {
   const existing = getTaskById(id);
   if (!existing) return c.json({ error: 'Task not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  const group = resolveGroupForTask(existing);
-  if ((!group || isHostExecutionGroup(group)) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
+  const group = getRegisteredGroup(existing.chat_jid);
+  if (!group) {
+    if (authUser.role !== 'admin') return c.json({ error: 'Task not found' }, 404);
+  } else {
+    if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+      return c.json({ error: 'Task not found' }, 404);
+    }
+    if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+      return c.json(
+        { error: 'Insufficient permissions for host execution mode' },
+        403,
+      );
+    }
   }
   const limitRaw = parseInt(c.req.query('limit') || '20', 10);
   const limit = Math.min(Number.isFinite(limitRaw) ? Math.max(1, limitRaw) : 20, 200);

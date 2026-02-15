@@ -10,6 +10,7 @@ import { TerminalManager } from './terminal-manager.js';
 import {
   type WebDeps,
   type Variables,
+  type WsClientInfo,
   setWebDeps,
   getWebDeps,
   wsClients,
@@ -18,6 +19,7 @@ import {
   parseCookie,
   isHostExecutionGroup,
   hasHostExecutionPermission,
+  canAccessGroup,
 } from './web-context.js';
 
 // Schemas
@@ -54,7 +56,7 @@ import {
   updateSessionLastActive,
 } from './db.js';
 import { isSessionExpired } from './auth.js';
-import type { NewMessage, WsMessageOut, WsMessageIn, AuthUser, StreamEvent } from './types.js';
+import type { NewMessage, WsMessageOut, WsMessageIn, AuthUser, StreamEvent, UserRole } from './types.js';
 import { WEB_PORT, SESSION_COOKIE_NAME } from './config.js';
 import { logger } from './logger.js';
 
@@ -147,6 +149,9 @@ app.post('/api/messages', authMiddleware, async (c) => {
   const group = getRegisteredGroup(chatJid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
   const authUser = c.get('user') as AuthUser;
+  if (!canAccessGroup(authUser, group)) {
+    return c.json({ error: 'Access denied' }, 403);
+  }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -154,7 +159,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
     );
   }
 
-  const result = await handleWebUserMessage(chatJid, content.trim(), attachments);
+  const result = await handleWebUserMessage(chatJid, content.trim(), attachments, authUser.id, authUser.display_name || authUser.username);
   if (!result.ok) return c.json({ error: result.error }, result.status);
   return c.json({
     success: true,
@@ -169,6 +174,8 @@ async function handleWebUserMessage(
   chatJid: string,
   content: string,
   attachments?: Array<{ type: 'image'; data: string; mimeType?: string }>,
+  userId = 'web-user',
+  displayName = 'Web',
 ): Promise<
   | {
       ok: true;
@@ -194,8 +201,8 @@ async function handleWebUserMessage(
   storeMessageDirect(
     messageId,
     chatJid,
-    'web-user',
-    'Web',
+    userId,
+    displayName,
     content,
     timestamp,
     false,
@@ -205,8 +212,8 @@ async function handleWebUserMessage(
   broadcastNewMessage(chatJid, {
     id: messageId,
     chat_jid: chatJid,
-    sender: 'web-user',
-    sender_name: 'Web',
+    sender: userId,
+    sender_name: displayName,
     content,
     timestamp,
     is_from_me: false,
@@ -217,8 +224,8 @@ async function handleWebUserMessage(
     {
       id: messageId,
       chat_jid: chatJid,
-      sender: 'web-user',
-      sender_name: 'Web',
+      sender: userId,
+      sender_name: displayName,
       content,
       timestamp,
     },
@@ -324,7 +331,12 @@ function setupWebSocket(server: any): WebSocketServer {
   wss.on('connection', (ws, request: any) => {
     const sessionId = request?.__happyclawSessionId as string | undefined;
     logger.info('WebSocket client connected');
-    wsClients.set(ws, sessionId || '');
+    const connSession = sessionId ? getSessionWithUser(sessionId) : undefined;
+    wsClients.set(ws, {
+      sessionId: sessionId || '',
+      userId: connSession?.user_id || '',
+      role: (connSession?.role || 'member') as UserRole,
+    });
 
     const cleanupTerminalForWs = () => {
       const termJid = wsTerminals.get(ws);
@@ -381,19 +393,28 @@ function setupWebSocket(server: any): WebSocketServer {
           }
           const { chatJid, content, attachments } = wsValidation.data;
 
-          // 宿主机模式群组需要 admin 权限
+          // 群组访问权限检查
           const targetGroup = getRegisteredGroup(chatJid);
-          if (targetGroup && isHostExecutionGroup(targetGroup)) {
-            if (session.role !== 'admin') {
+          if (targetGroup) {
+            if (!canAccessGroup({ id: session.user_id, role: session.role }, targetGroup)) {
               logger.warn(
                 { chatJid, userId: session.user_id },
-                'WebSocket send_message blocked: host mode requires admin',
+                'WebSocket send_message blocked: access denied',
               );
               return;
             }
+            if (isHostExecutionGroup(targetGroup)) {
+              if (session.role !== 'admin') {
+                logger.warn(
+                  { chatJid, userId: session.user_id },
+                  'WebSocket send_message blocked: host mode requires admin',
+                );
+                return;
+              }
+            }
           }
 
-          const result = await handleWebUserMessage(chatJid, content.trim(), attachments);
+          const result = await handleWebUserMessage(chatJid, content.trim(), attachments, session.user_id, session.display_name || session.username);
           if (!result.ok) {
             logger.warn(
               { chatJid, status: result.status, error: result.error },
@@ -585,16 +606,17 @@ function setupWebSocket(server: any): WebSocketServer {
 /**
  * Broadcast to all connected WebSocket clients.
  * If adminOnly is true, only send to clients whose session belongs to an admin user.
+ * If ownerUserId is provided, only send to that user and admins (for group isolation).
  */
-function safeBroadcast(msg: WsMessageOut, adminOnly = false): void {
+function safeBroadcast(msg: WsMessageOut, adminOnly = false, ownerUserId?: string): void {
   const data = JSON.stringify(msg);
-  for (const [client, sid] of wsClients) {
+  for (const [client, clientInfo] of wsClients) {
     if (client.readyState !== WebSocket.OPEN) {
       wsClients.delete(client);
       continue;
     }
 
-    if (!sid) {
+    if (!clientInfo.sessionId) {
       wsClients.delete(client);
       try {
         client.close(1008, 'Unauthorized');
@@ -604,7 +626,7 @@ function safeBroadcast(msg: WsMessageOut, adminOnly = false): void {
       continue;
     }
 
-    const session = getSessionWithUser(sid);
+    const session = getSessionWithUser(clientInfo.sessionId);
     const expired = !!session && isSessionExpired(session.expires_at);
     const invalid =
       !session ||
@@ -613,9 +635,9 @@ function safeBroadcast(msg: WsMessageOut, adminOnly = false): void {
       session.must_change_password;
     if (invalid) {
       if (expired) {
-        deleteUserSession(sid);
+        deleteUserSession(clientInfo.sessionId);
       }
-      lastActiveCache.delete(sid);
+      lastActiveCache.delete(clientInfo.sessionId);
       wsClients.delete(client);
       try {
         client.close(1008, 'Unauthorized');
@@ -629,12 +651,30 @@ function safeBroadcast(msg: WsMessageOut, adminOnly = false): void {
       continue;
     }
 
+    // Group isolation: only owner and admins can see this group's events
+    if (ownerUserId && session.role !== 'admin' && session.user_id !== ownerUserId) {
+      continue;
+    }
+
     try {
       client.send(data);
     } catch {
       wsClients.delete(client);
     }
   }
+}
+
+/**
+ * Get the owner userId for broadcast filtering.
+ * Returns undefined for Feishu/Telegram groups and main session (visible to all).
+ * For non-main Web groups, returns the created_by userId so only owner+admins see events.
+ */
+function getGroupOwnerUserId(chatJid: string): string | undefined {
+  const group = getRegisteredGroup(chatJid);
+  if (!group) return undefined;
+  if (!chatJid.startsWith('web:')) return undefined; // Feishu/Telegram groups visible to all
+  if (group.folder === 'main') return undefined; // Main session visible to all
+  return group.created_by ?? undefined;
 }
 
 /** Check if a chatJid belongs to a host-mode group (for broadcast filtering) */
@@ -659,9 +699,11 @@ function normalizeMainJid(chatJid: string): string {
 export function broadcastToWebClients(chatJid: string, text: string): void {
   const timestamp = new Date().toISOString();
   const jid = normalizeMainJid(chatJid);
+  const ownerUserId = getGroupOwnerUserId(chatJid);
   safeBroadcast(
     { type: 'agent_reply', chatJid: jid, text, timestamp },
     isHostGroupJid(chatJid),
+    ownerUserId,
   );
 }
 
@@ -670,6 +712,7 @@ export function broadcastNewMessage(
   msg: NewMessage & { is_from_me?: boolean },
 ): void {
   const jid = normalizeMainJid(chatJid);
+  const ownerUserId = getGroupOwnerUserId(chatJid);
   safeBroadcast(
     {
       type: 'new_message',
@@ -677,20 +720,24 @@ export function broadcastNewMessage(
       message: { ...msg, is_from_me: msg.is_from_me ?? false },
     },
     isHostGroupJid(chatJid),
+    ownerUserId,
   );
 }
 
 export function broadcastTyping(chatJid: string, isTyping: boolean): void {
   const jid = normalizeMainJid(chatJid);
+  const ownerUserId = getGroupOwnerUserId(chatJid);
   safeBroadcast(
     { type: 'typing', chatJid: jid, isTyping },
     isHostGroupJid(chatJid),
+    ownerUserId,
   );
 }
 
 export function broadcastStreamEvent(chatJid: string, event: StreamEvent): void {
   const jid = normalizeMainJid(chatJid);
-  safeBroadcast({ type: 'stream_event', chatJid: jid, event }, isHostGroupJid(chatJid));
+  const ownerUserId = getGroupOwnerUserId(chatJid);
+  safeBroadcast({ type: 'stream_event', chatJid: jid, event }, isHostGroupJid(chatJid), ownerUserId);
 }
 
 function broadcastStatus(): void {

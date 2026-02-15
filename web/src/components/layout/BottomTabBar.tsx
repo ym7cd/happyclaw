@@ -2,7 +2,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { MessageSquare, Layers, Clock, Activity, Settings } from 'lucide-react';
 
 const navItems = [
-  { path: '/chat', icon: MessageSquare, label: '聊天' },
+  { path: '/chat', icon: MessageSquare, label: '工作台' },
   { path: '/groups', icon: Layers, label: '会话' },
   { path: '/tasks', icon: Clock, label: '任务' },
   { path: '/monitor', icon: Activity, label: '监控' },

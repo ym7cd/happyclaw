@@ -10,6 +10,8 @@ import type { AuthUser, RegisteredGroup, ExecutionMode } from '../types.js';
 import {
   isHostExecutionGroup,
   hasHostExecutionPermission,
+  canAccessGroup,
+  canModifyGroup,
   MAX_GROUP_NAME_LEN,
   getWebDeps,
 } from '../web-context.js';
@@ -158,6 +160,9 @@ function buildGroupsPayload(user: AuthUser): Record<
 
     if (isMain && !isWeb) continue;
     if (isHost && !isAdmin) continue;
+
+    // User isolation: non-admin can only see their own web groups
+    if (!canAccessGroup({ id: user.id, role: user.role }, { ...group, jid })) continue;
 
     visibleEntries.push([jid, group]);
   }
@@ -492,6 +497,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     customCwd: executionMode === 'host' ? customCwd : undefined,
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
+    created_by: authUser.id,
   };
 
   setRegisteredGroup(jid, group);
@@ -559,11 +565,15 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   const existing = getRegisteredGroup(jid);
   if (!existing) return c.json({ error: 'Group not found' }, 404);
 
+  const authUser = c.get('user') as AuthUser;
+  if (!canModifyGroup({ id: authUser.id, role: authUser.role }, existing)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
+
   if (existing.folder === 'main' || !jid.startsWith('web:')) {
     return c.json({ error: 'This group cannot be edited' }, 403);
   }
 
-  const authUser = c.get('user') as AuthUser;
   if (isHostExecutionGroup(existing) && !hasHostExecutionPermission(authUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -607,11 +617,15 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   const existing = getRegisteredGroup(jid);
   if (!existing) return c.json({ error: 'Group not found' }, 404);
 
+  const authUser = c.get('user') as AuthUser;
+  if (!canModifyGroup({ id: authUser.id, role: authUser.role }, existing)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
+
   if (existing.folder === 'main' || !jid.startsWith('web:')) {
     return c.json({ error: 'This group cannot be deleted' }, 403);
   }
 
-  const authUser = c.get('user') as AuthUser;
   if (isHostExecutionGroup(existing) && !hasHostExecutionPermission(authUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -651,6 +665,9 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   const group = getRegisteredGroup(jid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
   const authUser = c.get('user') as AuthUser;
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -754,6 +771,9 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
   const group = getRegisteredGroup(jid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
   const authUser = c.get('user') as AuthUser;
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -824,6 +844,9 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   }
 
   const authUser = c.get('user') as AuthUser;
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -877,6 +900,9 @@ groupRoutes.get('/:jid/env', authMiddleware, (c) => {
   if (!group) return c.json({ error: 'Group not found' }, 404);
 
   const user = c.get('user') as AuthUser;
+  if (!canAccessGroup({ id: user.id, role: user.role }, group)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(user)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
@@ -904,6 +930,9 @@ groupRoutes.put('/:jid/env', authMiddleware, async (c) => {
   if (!group) return c.json({ error: 'Group not found' }, 404);
 
   const envUser = c.get('user') as AuthUser;
+  if (!canAccessGroup({ id: envUser.id, role: envUser.role }, group)) {
+    return c.json({ error: 'Group not found' }, 404);
+  }
   if (isHostExecutionGroup(group) && !hasHostExecutionPermission(envUser)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },

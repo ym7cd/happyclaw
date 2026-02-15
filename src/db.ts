@@ -107,7 +107,8 @@ export function initDatabase(): void {
       last_run TEXT,
       last_result TEXT,
       status TEXT DEFAULT 'active',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      created_by TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -140,7 +141,8 @@ export function initDatabase(): void {
       name TEXT NOT NULL,
       folder TEXT NOT NULL,
       added_at TEXT NOT NULL,
-      container_config TEXT
+      container_config TEXT,
+      created_by TEXT
     );
   `);
 
@@ -222,6 +224,8 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
+  ensureColumn('registered_groups', 'created_by', 'TEXT');
+  ensureColumn('scheduled_tasks', 'created_by', 'TEXT');
 
   // Migration: remove UNIQUE constraint from registered_groups.folder
   // Multiple groups (web:main + feishu chats) share folder='main' by design.
@@ -248,9 +252,10 @@ export function initDatabase(): void {
           execution_mode TEXT DEFAULT 'container',
           custom_cwd TEXT,
           init_source_path TEXT,
-          init_git_url TEXT
+          init_git_url TEXT,
+          created_by TEXT
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL FROM registered_groups;
+        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -280,6 +285,7 @@ export function initDatabase(): void {
     'last_result',
     'status',
     'created_at',
+    'created_by',
   ]);
   assertSchema(
     'registered_groups',
@@ -293,6 +299,7 @@ export function initDatabase(): void {
       'custom_cwd',
       'init_source_path',
       'init_git_url',
+      'created_by',
     ],
     ['trigger_pattern', 'requires_trigger'],
   );
@@ -347,7 +354,14 @@ export function initDatabase(): void {
   ]);
 
   // Store schema version after all migrations complete
-  const SCHEMA_VERSION = '11';
+  // Migrate existing web groups: assign to first admin
+  db.exec(`
+    UPDATE registered_groups SET created_by = (
+      SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at ASC LIMIT 1
+    ) WHERE jid LIKE 'web:%' AND folder != 'main' AND created_by IS NULL
+  `);
+
+  const SCHEMA_VERSION = '12';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -531,8 +545,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -545,6 +559,7 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.created_by ?? null,
   );
 }
 
@@ -749,6 +764,7 @@ export function getRegisteredGroup(
         custom_cwd: string | null;
         init_source_path: string | null;
         init_git_url: string | null;
+        created_by: string | null;
       }
     | undefined;
   if (!row) return undefined;
@@ -765,13 +781,14 @@ export function getRegisteredGroup(
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
+    created_by: row.created_by ?? undefined,
   };
 }
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -782,6 +799,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.customCwd ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
+    group.created_by ?? null,
   );
 }
 
@@ -808,6 +826,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     custom_cwd: string | null;
     init_source_path: string | null;
     init_git_url: string | null;
+    created_by: string | null;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -822,6 +841,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       customCwd: row.custom_cwd ?? undefined,
       initSourcePath: row.init_source_path ?? undefined,
       initGitUrl: row.init_git_url ?? undefined,
+      created_by: row.created_by ?? undefined,
     };
   }
   return result;

@@ -42,6 +42,7 @@ export interface RegisteredGroup {
   customCwd?: string; // 宿主机模式的自定义工作目录（绝对路径）
   initSourcePath?: string; // 容器模式下复制来源的宿主机绝对路径
   initGitUrl?: string; // 容器模式下 clone 来源的 Git URL
+  created_by?: string;
 }
 
 export interface NewMessage {
@@ -78,6 +79,7 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
+  created_by?: string;
 }
 
 export interface TaskRunLog {

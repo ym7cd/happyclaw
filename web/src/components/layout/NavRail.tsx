@@ -5,7 +5,7 @@ import { EmojiAvatar } from '../common/EmojiAvatar';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 const navItems = [
-  { path: '/chat', icon: MessageSquare, label: '聊天' },
+  { path: '/chat', icon: MessageSquare, label: '工作台' },
   { path: '/tasks', icon: Clock, label: '任务' },
   { path: '/monitor', icon: Activity, label: '监控' },
   { path: '/settings', icon: Settings, label: '设置' },
