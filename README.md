@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/riba2534/happyclaw/main/web/public/icons/logo-1024.png" alt="HappyClaw Logo" width="120" />
+  <img src="web/public/icons/logo-1024.png" alt="HappyClaw Logo" width="120" />
 </p>
 
 <h1 align="center">HappyClaw</h1>
 
 <p align="center">
-  自托管 AI Agent 系统 —— 基于 Claude Code 封装，而非重新造轮子
+  你的 <a href="https://github.com/nicepkg/OpenClaw">OpenClaw</a> + <a href="https://github.com/anthropics/claude-code/tree/main/packages/cowork">Cowork</a>，基于 Claude Code 驱动
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="#为什么选择-happyclaw">理念</a> · <a href="#特性">特性</a> · <a href="#架构">架构</a> · <a href="#快速开始">快速开始</a> · <a href="#技术栈">技术栈</a> · <a href="#开发">开发</a>
+  <a href="#为什么选择-happyclaw">理念</a> · <a href="#核心能力">核心能力</a> · <a href="#架构">架构</a> · <a href="#快速开始">快速开始</a> · <a href="#技术栈">技术栈</a> · <a href="#开发指南">开发指南</a>
 </p>
 
 ---
@@ -40,147 +40,228 @@
 
 ## 为什么选择 HappyClaw
 
-世界上最好的 AI Agent 是 Claude Code。它拥有完整的文件读写、终端操作、浏览器自动化和多轮推理能力。**HappyClaw 不重新造轮子，而是直接在 Claude Code 上封装一层**，让你通过飞书、Telegram 或 Web 界面随时随地调用它。
+世界上最好的 AI Agent 是 Claude Code——完整的文件读写、终端操作、浏览器自动化、多轮推理、MCP 生态。**HappyClaw 不重新造轮子**，直接在 Claude Code 之上封装：你通过飞书、Telegram 或 Web 界面发一条消息，背后运行的就是完整的 Claude Code。
 
-这意味着 Claude Code 的每一次升级——新工具、更好的推理、更多的 MCP 支持——HappyClaw 都能自动受益，无需等待适配。你获得的不是一个"类 Claude"的仿制品，而是 Claude Code 本身，加上多渠道接入、会话隔离、持久记忆和任务调度。
+这意味着 Claude Code 的每一次升级——新工具、更好的推理、更多的 MCP 支持——HappyClaw **零适配自动受益**。
 
-HappyClaw 借鉴了 [OpenClaw](https://github.com/nicepkg/OpenClaw) 的容器化架构思路，结合远程办公 Agent 的理念：让 AI Agent 作为你的个人远程助手，在隔离环境中帮你调研问题、执行任务、管理文件，结果通过你习惯的 IM 渠道送达。
+项目借鉴了 [OpenClaw](https://github.com/nicepkg/OpenClaw) 的容器化架构，并融合了 [Cowork](https://github.com/anthropics/claude-code/tree/main/packages/cowork) 的多会话协作思路：多个独立 Agent 会话并行工作，各自拥有隔离的工作空间和持久记忆，结果通过你习惯的 IM 渠道送达。
 
-## 特性
+## 核心能力
 
 ### 多渠道接入
 
-- **飞书集成** — WebSocket 长连接，富文本卡片回复，图片消息，Reaction 反馈
-- **Telegram 集成** — Bot API，Markdown→HTML 渲染，长消息自动分片
-- **Web 聊天** — WebSocket 实时通信，图片粘贴 / 拖拽上传，虚拟滚动
-- **统一路由** — 消息原路返回，飞书来源回飞书，Web 来源回 Web
+| 渠道 | 连接方式 | 消息格式 | 特色 |
+|------|---------|---------|------|
+| **飞书** | WebSocket 长连接 | 富文本卡片 | 图片消息、Reaction 反馈、自动注册群组 |
+| **Telegram** | Bot API (Long Polling) | Markdown → HTML | 长消息自动分片（3800 字符） |
+| **Web** | WebSocket 实时通信 | 流式 Markdown | 图片粘贴/拖拽上传、虚拟滚动 |
+
+消息统一路由：飞书来源回飞书，Telegram 来源回 Telegram，Web 来源回 Web。
 
 ### Agent 执行引擎
 
-- **基于 Claude Agent SDK + Claude Code CLI** — 不是调用 API，是运行完整的 Claude Code
-- **宿主机模式** — Agent 直接在宿主机运行，访问本地文件系统，零 Docker 依赖
-- **容器模式** — Docker 隔离执行，非 root 用户，独立工作目录
+基于 [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/claude-agent-sdk) 构建，SDK 底层调用完整的 Claude Code CLI。
+
+- **宿主机模式**（默认）— Agent 直接在宿主机运行，访问本地文件系统，零 Docker 依赖
+- **容器模式** — Docker 隔离执行，非 root 用户，预装 40+ 工具（Chromium、Python、ffmpeg、数据库客户端等）
+- **多会话并发** — 最多 20 个容器 + 5 个宿主机进程同时运行，会话级队列调度
 - **自定义工作目录** — 每个会话可配置 `customCwd` 指向不同项目
-- **并发控制** — 最多 20 个容器 + 5 个宿主机进程，会话级队列
-- **指数退避重试** — 5s → 10s → 20s → 40s → 80s，最多 5 次
-- **上下文溢出自动恢复** — 对话超长时自动压缩，PreCompact Hook 归档历史
+- **失败自动恢复** — 指数退避重试（5s → 80s，最多 5 次），上下文溢出自动压缩并归档历史
 
 ### 实时流式体验
 
-- **思考过程实时展示** — 可折叠的 thinking 面板，逐字推送
-- **工具调用实时追踪** — 工具名称、执行耗时、嵌套层级、输入参数摘要
+Agent 的思考和执行过程实时推送到前端，而非等待最终结果：
+
+- **思考过程** — 可折叠的 Extended Thinking 面板，逐字推送
+- **工具调用追踪** — 工具名称、执行耗时、嵌套层级、输入参数摘要
 - **调用轨迹时间线** — 最近 30 条工具调用记录，快速回溯
 - **Hook 执行状态** — PreToolUse / PostToolUse Hook 的启动、进度、结果
-- **流式 Markdown 渲染** — 文本增量实时渲染（GFM 表格、代码高亮、图片 Lightbox）
+- **流式 Markdown 渲染** — GFM 表格、代码高亮、图片 Lightbox
 
-### 管理与扩展
+### 10 个 MCP 工具
 
-- **10 个 MCP 工具** — `send_message`、`schedule_task`、`list_tasks`、`pause_task`、`resume_task`、`cancel_task`、`register_group`、`memory_append`、`memory_search`、`memory_get`
-- **定时任务** — Cron / 固定间隔 / 一次性三种模式，group / isolated 上下文，执行日志
-- **Skills 系统** — 项目级 + 用户级，volume 挂载自动发现，无需重建镜像
-- **记忆系统** — 全局 + 会话级 `CLAUDE.md`，日期记忆文件，全文检索，Web 在线编辑，PreCompact 归档
-- **Web 终端** — 基于 xterm.js + node-pty，WebSocket 连接，可拖拽调整面板
-- **文件管理** — 上传（50MB）/ 下载 / 删除，目录管理，图片预览，拖拽上传
-- **容器环境变量** — 全局配置 + 群组级覆盖，变更审计日志
+Agent 在运行时可通过内置 MCP Server 与主进程通信：
 
-### 安全与运维
+| 工具 | 说明 |
+|------|------|
+| `send_message` | 运行期间即时发送消息给用户/群组 |
+| `schedule_task` | 创建定时/周期/一次性任务（cron / interval / once） |
+| `list_tasks` | 列出定时任务 |
+| `pause_task` / `resume_task` / `cancel_task` | 暂停、恢复、取消任务 |
+| `register_group` | 注册新群组（仅主会话） |
+| `memory_append` | 追加时效性记忆到 `memory/YYYY-MM-DD.md` |
+| `memory_search` | 全文检索工作区记忆文件 |
+| `memory_get` | 读取记忆文件内容 |
 
-- **多用户 RBAC** — 5 种权限，4 种模板（admin_full / member_basic / ops_manager / user_admin）
-- **邀请码注册** — 可配置开放注册 / 邀请码 / 关闭注册
-- **审计日志** — 18 种事件类型，完整操作追踪
-- **AES-256-GCM 加密** — API 密钥加密存储，Web API 仅返回掩码值
-- **路径遍历防护** — normalize + realpath + 符号链接检测，系统路径保护
-- **挂载安全** — 白名单校验 + 黑名单模式匹配（`.ssh`、`.gnupg` 等敏感路径）
-- **登录限流** — 5 次失败锁定 15 分钟，会话管理（30 天有效期）
-- **PWA 支持** — 可安装为桌面 / 移动应用，iOS 适配，离线缓存
-- **零配置设置向导** — 首次访问引导完成管理员创建和服务配置
+### 定时任务
+
+- 三种调度模式：**Cron 表达式** / **固定间隔** / **一次性执行**
+- 两种上下文模式：`group`（在指定会话中执行）/ `isolated`（独立隔离环境）
+- 完整的执行日志（耗时、状态、结果），Web 界面管理
+
+### 记忆系统
+
+Agent 自主维护跨会话的持久记忆：
+
+- **全局记忆** — `groups/global/CLAUDE.md`，所有会话可读
+- **会话记忆** — `groups/{folder}/CLAUDE.md`，会话私有
+- **日期记忆** — `memory/YYYY-MM-DD.md`，时效性信息
+- **对话归档** — PreCompact Hook 在上下文压缩前自动归档到 `conversations/`
+- **全文检索** — Web 界面在线编辑 + 搜索
+
+### Skills 系统
+
+- **项目级 Skills** — 放在 `container/skills/`，所有容器自动挂载
+- **用户级 Skills** — 放在 `~/.claude/skills/`，所有容器自动挂载
+- 无需重建镜像，volume 挂载 + 符号链接自动发现
+
+### Web 终端
+
+基于 xterm.js + node-pty 的完整终端：WebSocket 连接，可拖拽调整面板，直接在 Web 界面中操作服务器。
+
+### 文件管理
+
+上传（50MB 限制）/ 下载 / 删除，目录管理，图片预览，拖拽上传。路径遍历防护 + 系统路径保护。
+
+### 安全与多用户
+
+| 能力 | 说明 |
+|------|------|
+| **RBAC** | 5 种权限，4 种角色模板（admin_full / member_basic / ops_manager / user_admin） |
+| **注册控制** | 开放注册 / 邀请码注册 / 关闭注册 |
+| **审计日志** | 18 种事件类型，完整操作追踪 |
+| **加密存储** | API 密钥 AES-256-GCM 加密，Web API 仅返回掩码值 |
+| **挂载安全** | 白名单校验 + 黑名单模式匹配（`.ssh`、`.gnupg` 等敏感路径） |
+| **登录保护** | 5 次失败锁定 15 分钟，bcrypt 12 轮，HMAC Cookie，30 天会话有效期 |
+| **PWA** | 可安装为桌面/移动应用，iOS 适配 |
 
 ## 架构
 
 ```mermaid
 flowchart TD
-    Feishu("飞书<br/>(WebSocket 长连接)") --> Main["主进程<br/>(Node.js + Hono)"]
-    Telegram("Telegram<br/>(Bot API)") --> Main
-    Web("Web 界面<br/>(React SPA)") --> Main
+    subgraph 接入层
+        Feishu("飞书<br/>(WebSocket 长连接)")
+        Telegram("Telegram<br/>(Bot API)")
+        Web("Web 界面<br/>(React 19 SPA)")
+    end
 
-    Main --> Queue["消息队列<br/>(并发控制)"]
-    Main --> Scheduler["定时调度器<br/>(Cron / 间隔 / 一次性)"]
-    Main --> WS["WebSocket<br/>(实时推送)"]
-    Main --> DB[("SQLite<br/>(WAL 模式)")]
+    subgraph 主进程["主进程 (Node.js + Hono)"]
+        Router["消息路由<br/>(2s 轮询 + 去重)"]
+        Queue["并发队列<br/>(20 容器 + 5 宿主机进程)"]
+        Scheduler["定时调度器<br/>(Cron / 间隔 / 一次性)"]
+        WS["WebSocket Server<br/>(流式推送 + 终端)"]
+        Auth["认证 & RBAC<br/>(bcrypt + HMAC Cookie)"]
+        Config["配置管理<br/>(AES-256-GCM 加密)"]
+    end
 
-    Queue --> Host["宿主机进程<br/>(Claude Code CLI)"]
-    Queue --> Container["Docker 容器<br/>(agent-runner)"]
+    subgraph 执行层
+        Host["宿主机进程<br/>(Claude Code CLI)"]
+        Container["Docker 容器<br/>(agent-runner)"]
+    end
 
-    Host --> SDK["Claude Agent SDK<br/>+ MCP Server"]
+    subgraph Agent["Agent 运行时"]
+        SDK["Claude Agent SDK<br/>(query 循环)"]
+        MCP["MCP Server<br/>(10 个工具)"]
+        Stream["流式事件<br/>(11 种类型)"]
+    end
+
+    DB[("SQLite<br/>(WAL 模式)")]
+    IPC["IPC 文件通道<br/>(原子读写)"]
+    Memory["记忆系统<br/>(CLAUDE.md + memory/)"]
+
+    Feishu --> Router
+    Telegram --> Router
+    Web --> Router
+
+    Router --> Queue
+    Queue --> Host
+    Queue --> Container
+    Scheduler --> Queue
+
+    Host --> SDK
     Container --> SDK
+    SDK --> MCP
+    SDK --> Stream
 
-    SDK --> IPC["IPC 文件通道<br/>(原子读写)"]
-    IPC --> Main
+    MCP --> IPC
+    IPC --> Router
+
+    Stream --> WS
+    WS --> Web
+
+    Router --> DB
+    Auth --> DB
+    SDK --> Memory
 
     class Feishu,Telegram,Web fe
-    class Main,Queue,Scheduler,WS svc
+    class Router,Queue,Scheduler,WS,Auth,Config svc
     class DB db
-    class Host,Container,SDK faas
+    class Host,Container faas
+    class SDK,MCP,Stream faas
     class IPC cfg
+    class Memory cfg
 ```
 
-主进程以 2 秒间隔轮询新消息，分发到并发队列（最多 20 个容器 + 5 个宿主机进程）。容器或宿主机进程中的 `agent-runner` 调用 Claude Agent SDK 的 `query()` 函数，流式输出通过 stdout 标记协议传回主进程，再经 WebSocket 广播到 Web 客户端或通过 IM API 回复到飞书 / Telegram。MCP Server 通过基于文件的 IPC 提供 10 个工具与主进程通信。
+**数据流**：消息从接入层进入主进程，经去重和路由后分发到并发队列。队列启动宿主机进程或 Docker 容器，内部的 agent-runner 调用 Claude Agent SDK 的 `query()` 函数。流式事件（思考、文本、工具调用等 11 种类型）通过 stdout 标记协议传回主进程，再经 WebSocket 广播到 Web 客户端或通过 IM API 回复到飞书/Telegram。MCP Server 通过基于文件的 IPC 通道提供 10 个工具，实现 Agent 与主进程的双向通信。
 
 ## 快速开始
 
 ### 前置要求
 
-- **Node.js** >= 20
-- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — 宿主机模式必需（`npm install -g @anthropic-ai/claude-code`）
-- **Claude API 密钥** — Anthropic 官方或兼容的中转服务
-- **Docker Desktop**（可选）— 仅容器模式需要
-- **飞书企业自建应用凭据**（可选）— 仅飞书集成需要
-- **Telegram Bot Token**（可选）— 仅 Telegram 集成需要
+| 依赖 | 必需 | 说明 |
+|------|------|------|
+| [Node.js](https://nodejs.org) >= 20 | 是 | 运行主服务和前端构建 |
+| Claude API 密钥 | 是 | Anthropic 官方或兼容的中转服务，在 Web 界面中配置 |
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | 否 | 仅容器模式需要 |
+| 飞书企业自建应用凭据 | 否 | 仅飞书集成需要 |
+| Telegram Bot Token | 否 | 仅 Telegram 集成需要 |
 
-### 安装和启动
+> Claude Code CLI 无需手动安装——项目依赖的 Claude Agent SDK 已内置完整的 CLI 运行时，`make start` 首次启动时自动安装。
+
+### 安装
 
 ```bash
-# 1. 克隆
-git clone https://github.com/riba2534/happyclaw.git && cd happyclaw
+# 克隆仓库
+git clone https://github.com/riba2534/happyclaw.git
+cd happyclaw
 
-# 2. 安装 Claude Code CLI（宿主机模式必需）
-npm install -g @anthropic-ai/claude-code
-
-# 3. 一键启动（首次自动安装依赖 + 编译）
+# 一键启动（首次自动安装依赖 + 编译）
 make start
 ```
 
-浏览器打开 `http://localhost:3000`，首次访问会引导创建管理员账号（自定义用户名和密码）。
+浏览器打开 `http://localhost:3000`，按照设置向导完成配置：
 
-登录后在**设置**页面配置 Claude API 和 IM 集成。所有配置通过 Web 界面完成，无需手动编辑 `.env` 文件。
+1. **创建管理员** — 自定义用户名和密码（无默认账号）
+2. **配置 Claude API** — 填入 API 密钥和模型（支持中转服务）
+3. **配置 IM 集成**（可选）— 飞书 App ID/Secret 或 Telegram Bot Token
+4. **开始对话** — 在 Web 聊天页面直接发送消息
 
-> **开发者？** 使用 `make dev` 替代 `make start`，前后端均支持热更新。
+> 所有配置通过 Web 界面完成，无需手动编辑 `.env` 文件。API 密钥 AES-256-GCM 加密存储。
 
-## 执行模式
-
-HappyClaw 支持两种 Agent 执行模式：
+### 执行模式
 
 | 模式 | 说明 | 前置要求 |
 |------|------|---------|
 | **宿主机模式**（默认） | Agent 直接在宿主机运行，访问本地文件系统 | Claude Code CLI |
-| **容器模式** | Agent 在 Docker 容器中隔离运行，非 root 用户 | Docker Desktop + 构建镜像 |
+| **容器模式** | Agent 在 Docker 容器中隔离运行，预装 40+ 工具 | Docker Desktop |
 
-主会话默认使用宿主机模式，开箱即用无需 Docker。如需容器模式，先构建镜像：
+主会话默认使用宿主机模式，开箱即用。如需容器模式：
 
 ```bash
+# 构建容器镜像
 ./container/build.sh
 ```
 
-然后在 Web 管理界面中将对应会话的执行模式切换为「容器模式」。
+然后在 Web 界面的会话管理中切换执行模式为「容器模式」。
 
-## 容器工具链
+### 容器工具链
 
 容器镜像基于 `node:22-slim`，预装以下工具：
 
 | 类别 | 工具 |
 |------|------|
-| 浏览器自动化 | Chromium、agent-browser |
 | AI / Agent | Claude Code CLI、Claude Agent SDK、MCP SDK |
+| 浏览器自动化 | Chromium、agent-browser |
 | 编程语言 | Node.js 22、Python 3、uv / uvx |
 | 编译构建 | build-essential、cmake、pkg-config |
 | 文本搜索 | ripgrep (`rg`)、fd-find (`fd`) |
@@ -197,8 +278,10 @@ HappyClaw 支持两种 Agent 执行模式：
 |------|------|
 | **后端** | Node.js 22 · TypeScript 5.7 · Hono · better-sqlite3 (WAL) · ws · node-pty · Pino · Zod |
 | **前端** | React 19 · Vite 6 · Zustand 5 · Tailwind CSS 4 · shadcn/ui · react-markdown · xterm.js · @tanstack/react-virtual · PWA |
-| **容器** | Docker (node:22-slim) · Claude Agent SDK · Claude Code CLI · MCP SDK · Chromium · agent-browser |
+| **Agent** | Claude Agent SDK · Claude Code CLI · MCP SDK · IPC 文件通道 |
+| **容器** | Docker (node:22-slim) · Chromium · agent-browser · Python · 40+ 预装工具 |
 | **安全** | bcrypt (12 轮) · AES-256-GCM · HMAC Cookie · RBAC · 路径遍历防护 · 挂载白名单 |
+| **IM 集成** | @larksuiteoapi/node-sdk (飞书) · grammY (Telegram) |
 
 ## 目录结构
 
@@ -244,42 +327,26 @@ happyclaw/
 └── Makefile                      # 常用命令
 ```
 
-## Web 页面
-
-| 页面 | 路由 | 功能 |
-|------|------|------|
-| 设置向导 | `/setup` | 首次启动配置引导 |
-| 登录 | `/login` | 用户名密码认证 |
-| 注册 | `/register` | 新用户注册（可配置开关） |
-| 聊天 | `/chat/:groupFolder?` | 消息收发、流式显示、思考过程 |
-| 群组 | `/groups` | 会话管理、执行模式切换 |
-| 任务 | `/tasks` | 定时任务管理 + 执行日志 |
-| 监控 | `/monitor` | 容器状态、队列、系统信息 |
-| 记忆 | `/memory` | 记忆文件编辑 + 全文检索 |
-| Skills | `/skills` | Skills 列表与管理 |
-| 设置 | `/settings` | Claude / 飞书 / Telegram 配置 |
-| 用户 | `/users` | 用户管理（管理员） |
-| 更多 | `/more` | 移动端聚合导航 |
-
-## 开发
+## 开发指南
 
 ```bash
 make dev              # 前后端并行启动（热更新）
-make dev-backend      # 仅后端
-make dev-web          # 仅前端
+make dev-backend      # 仅启动后端
+make dev-web          # 仅启动前端
 make build            # 编译全部（后端 + 前端 + agent-runner）
 make start            # 一键启动生产环境
 make typecheck        # TypeScript 全量类型检查
 make format           # 代码格式化（Prettier）
 make clean            # 清理构建产物
+make reset-init       # 重置为首装状态（清空数据库和运行时数据）
 ```
 
-| 服务 | 端口 |
-|------|------|
-| 后端（Hono + WebSocket） | 3000 |
-| 前端开发服务器（Vite） | 5173（代理 `/api` 和 `/ws` 到 3000） |
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| 后端 | 3000 | Hono + WebSocket |
+| 前端开发服务器 | 5173 | Vite，代理 `/api` 和 `/ws` 到后端 |
 
-## 环境变量
+### 环境变量
 
 以下为可选覆盖项。推荐使用 Web 设置向导配置 Claude API 和 IM 凭据（加密存储）。
 
@@ -293,18 +360,17 @@ make clean            # 清理构建产物
 | `MAX_CONCURRENT_HOST_PROCESSES` | `5` | 宿主机进程并发上限 |
 | `TZ` | 系统时区 | 定时任务时区 |
 
-## 管理员密码恢复
+### 管理员密码恢复
 
 ```bash
 npm run reset:admin -- <用户名> <新密码>
 ```
 
-## 数据重置
-
-如需重置为全新状态：
+### 数据重置
 
 ```bash
 make reset-init
+
 # 或手动：
 rm -f store/messages.db
 rm -rf data/sessions/ data/ipc/ data/env/

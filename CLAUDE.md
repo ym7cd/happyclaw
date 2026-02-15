@@ -88,10 +88,10 @@ Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程�
 
 | 模式 | 行为 | 前置依赖 |
 |------|------|---------|
-| `host` | Agent 作为宿主机进程运行，通过 `claude` CLI 直接访问宿主机文件系统 | Claude Code CLI（全局安装） |
+| `host` | Agent 作为宿主机进程运行，通过 `claude` CLI 直接访问宿主机文件系统 | Claude Agent SDK（自动安装） |
 | `container` | Agent 在 Docker 容器中运行，通过卷挂载访问文件，完全隔离 | Docker Desktop + 构建镜像 |
 
-**注意**：主会话（`folder === main`）在 `loadState()` 中会被自动设为 `host` 模式。宿主机模式通过 `node container/agent-runner/dist/index.js` 启动 agent-runner 进程，agent-runner 内部调用 `@anthropic-ai/claude-agent-sdk`，SDK 底层依赖全局安装的 `claude` CLI 作为工具运行时引擎。
+**注意**：主会话（`folder === main`）在 `loadState()` 中会被自动设为 `host` 模式。宿主机模式通过 `node container/agent-runner/dist/index.js` 启动 agent-runner 进程，agent-runner 内部调用 `@anthropic-ai/claude-agent-sdk`，SDK 内置了完整的 Claude Code CLI 运行时（`cli.js`），无需全局安装。
 
 宿主机模式支持 `customCwd` 自定义工作目录，使用 `MAX_CONCURRENT_HOST_PROCESSES`（默认 5）作为独立的并发限制。
 

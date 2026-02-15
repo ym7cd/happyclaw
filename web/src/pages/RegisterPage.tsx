@@ -233,6 +233,13 @@ export function RegisterPage() {
               去登录
             </Link>
           </p>
+
+          <p className="text-center text-sm text-slate-500 mt-2">
+            HappyClaw - Powered by{' '}
+            <a href="https://github.com/riba2534" target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80">
+              riba2534
+            </a>
+          </p>
         </div>
       </div>
     </div>
