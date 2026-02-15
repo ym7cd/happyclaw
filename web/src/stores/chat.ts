@@ -164,7 +164,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         let nextCurrent = currentStillExists ? state.currentGroup : null;
         if (!nextCurrent) {
           const homeEntry = Object.entries(data.groups).find(
-            ([_, group]) => group.is_home,
+            ([_, group]) => group.is_my_home,
           );
           if (homeEntry) {
             nextCurrent = homeEntry[0];

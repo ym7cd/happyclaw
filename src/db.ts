@@ -987,7 +987,7 @@ export function ensureUserHomeGroup(
     const existingMain = getRegisteredGroup(jid);
     if (existingMain) {
       // web:main already exists.
-      // Ensure both is_home and created_by are set for owner-based routing.
+      // Ensure is_home, created_by, and executionMode are correct for owner-based routing.
       const patched = { ...existingMain };
       let changed = false;
       if (!patched.is_home) {
@@ -996,6 +996,11 @@ export function ensureUserHomeGroup(
       }
       if (!patched.created_by) {
         patched.created_by = userId;
+        changed = true;
+      }
+      // Admin home container must use host mode
+      if (patched.executionMode !== 'host') {
+        patched.executionMode = 'host';
         changed = true;
       }
       if (changed) {

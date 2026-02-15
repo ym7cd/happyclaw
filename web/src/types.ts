@@ -4,6 +4,7 @@ export interface GroupInfo {
   added_at: string;
   kind?: 'home' | 'main' | 'feishu' | 'web';
   is_home?: boolean;
+  is_my_home?: boolean;
   editable?: boolean;
   deletable?: boolean;
   lastMessage?: string;

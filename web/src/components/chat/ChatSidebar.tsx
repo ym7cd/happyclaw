@@ -53,7 +53,7 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
 
     for (const [jid, info] of Object.entries(groups)) {
       const entry = { jid, ...info };
-      if (info.is_home) {
+      if (info.is_my_home) {
         main = entry;
       } else {
         others.push(entry);

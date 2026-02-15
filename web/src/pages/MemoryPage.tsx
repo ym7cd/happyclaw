@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpen, Loader2, RefreshCw, Save } from 'lucide-react';
+import { ArrowLeft, BookOpen, Loader2, RefreshCw, Save } from 'lucide-react';
 import { api } from '../api/client';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
+import { useMediaQuery } from '@/hooks/useMediaQuery';
 
 interface MemorySource {
   path: string;
@@ -71,6 +72,9 @@ export function MemoryPage() {
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  const isMobile = useMediaQuery('(max-width: 1023px)');
+  const [showContent, setShowContent] = useState(false);
 
   const dirty = useMemo(() => content !== initialContent, [content, initialContent]);
 
@@ -184,11 +188,17 @@ export function MemoryPage() {
   }, [keyword]);
 
   const handleSelectSource = async (path: string) => {
+    if (path === selectedPath && isMobile) {
+      // Mobile: re-tap selected item to show content panel
+      setShowContent(true);
+      return;
+    }
     if (path === selectedPath) return;
     if (dirty && !confirm('当前有未保存修改，切换会丢失。是否继续？')) {
       return;
     }
     await loadFile(path);
+    if (isMobile) setShowContent(true);
   };
 
   const handleSave = async () => {
@@ -248,6 +258,7 @@ export function MemoryPage() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4">
+          {(!isMobile || !showContent) && (
           <div className="bg-white rounded-xl border border-slate-200 p-4">
             <div className="mb-3">
               <Input
@@ -265,7 +276,7 @@ export function MemoryPage() {
               </div>
             </div>
 
-            <div className="space-y-4 max-h-[560px] overflow-auto pr-1">
+            <div className="space-y-4 max-h-[calc(100dvh-280px)] lg:max-h-[560px] overflow-auto pr-1">
               {(['user-global', 'main', 'flow', 'session'] as const).map((scope) => {
                 const items = groupedSources[scope];
                 if (items.length === 0) return null;
@@ -315,10 +326,21 @@ export function MemoryPage() {
               )}
             </div>
           </div>
+          )}
 
+          {(!isMobile || showContent) && (
           <div className="bg-white rounded-xl border border-slate-200 p-4 lg:p-6">
             {selectedPath ? (
               <>
+                {isMobile && (
+                  <button
+                    onClick={() => setShowContent(false)}
+                    className="flex items-center gap-1 text-sm text-primary mb-3 hover:underline"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    返回列表
+                  </button>
+                )}
                 <div className="mb-3">
                   <div className="text-sm font-semibold text-slate-900 break-all">{selectedPath}</div>
                   <div className="text-xs text-slate-500 mt-1">
@@ -329,7 +351,7 @@ export function MemoryPage() {
                 <Textarea
                   value={content}
                   onChange={(e) => setContent(e.target.value)}
-                  className="min-h-[460px] resize-y p-4 font-mono text-sm leading-6 disabled:bg-slate-50"
+                  className="min-h-[calc(100dvh-380px)] lg:min-h-[460px] resize-y p-4 font-mono text-sm leading-6 disabled:bg-slate-50"
                   placeholder={loadingFile ? '正在加载...' : '此记忆源暂无内容'}
                   disabled={loadingFile || saving || !fileMeta?.writable}
                 />
@@ -371,6 +393,7 @@ export function MemoryPage() {
               <div className="text-sm text-slate-500">暂无可用记忆源</div>
             )}
           </div>
+          )}
         </div>
       </div>
     </div>

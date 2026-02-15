@@ -132,6 +132,7 @@ function buildGroupsPayload(user: AuthUser): Record<
     execution_mode: 'container' | 'host';
     custom_cwd?: string;
     is_home?: boolean;
+    is_my_home?: boolean;
   }
 > {
   const groups = getAllRegisteredGroups();
@@ -157,6 +158,7 @@ function buildGroupsPayload(user: AuthUser): Record<
       execution_mode: 'container' | 'host';
       custom_cwd?: string;
       is_home?: boolean;
+      is_my_home?: boolean;
     }
   > = {};
 
@@ -170,6 +172,10 @@ function buildGroupsPayload(user: AuthUser): Record<
     // Hide IM channels that belong to a home folder.
     // These are merged into the home conversation in UI and message APIs.
     if (!isWeb && !isHome && homeFolders.has(group.folder)) continue;
+
+    // Hide other users' home groups from the chat sidebar.
+    // Each user only sees their own home container.
+    if (isHome && group.created_by !== user.id) continue;
 
     // Host execution groups require admin unless it's the user's own home group
     if (isHost && !isAdmin && !(isHome && group.created_by === user.id)) continue;
@@ -214,6 +220,7 @@ function buildGroupsPayload(user: AuthUser): Record<
       execution_mode: group.executionMode || 'container',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       is_home: isHome || undefined,
+      is_my_home: (isHome && group.created_by === user.id) || undefined,
     };
   }
 
@@ -880,10 +887,10 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
       if (siblingJid === jid) continue;
       const siblingGroup = getRegisteredGroup(siblingJid);
       if (!siblingGroup) continue;
-      if (
-        authUser.role === 'admin' ||
-        (group.created_by && siblingGroup.created_by === group.created_by)
-      ) {
+      // Merge siblings by ownership: same creator, or admin's own IM channels
+      const ownerMatch = group.created_by && siblingGroup.created_by === group.created_by;
+      const adminSelfMatch = authUser.role === 'admin' && siblingGroup.created_by === authUser.id;
+      if (ownerMatch || adminSelfMatch) {
         queryJids.push(siblingJid);
       }
     }

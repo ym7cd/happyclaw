@@ -244,8 +244,11 @@ function loadState(): void {
     }
     for (const user of activeUsers) {
       const homeJid = ensureUserHomeGroup(user.id, user.role as 'admin' | 'member', user.username);
-      // Refresh in-memory cache if a new home group was created
-      if (!registeredGroups[homeJid]) {
+      // Always refresh this entry from DB to pick up any patches (is_home, executionMode, etc.)
+      const freshGroup = getRegisteredGroup(homeJid);
+      if (freshGroup) {
+        registeredGroups[homeJid] = freshGroup;
+      } else if (!registeredGroups[homeJid]) {
         registeredGroups = getAllRegisteredGroups();
       }
     }
