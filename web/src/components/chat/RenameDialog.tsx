@@ -44,11 +44,11 @@ export function RenameDialog({ open, jid, currentName, onClose }: RenameDialogPr
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>重命名容器</DialogTitle>
+          <DialogTitle>重命名工作区</DialogTitle>
         </DialogHeader>
 
         <div>
-          <label className="block text-sm font-medium mb-2">容器名称</label>
+          <label className="block text-sm font-medium mb-2">工作区名称</label>
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}

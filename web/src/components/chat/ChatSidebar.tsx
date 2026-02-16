@@ -154,12 +154,12 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
           onClick={() => setCreateOpen(true)}
         >
           <Plus className="w-4 h-4" />
-          新容器
+          新工作区
         </Button>
         <SearchInput
           value={searchQuery}
           onChange={setSearchQuery}
-          placeholder="搜索容器..."
+          placeholder="搜索工作区..."
           debounce={200}
           className="max-lg:bg-white/50 max-lg:backdrop-blur-lg max-lg:border-white/30 max-lg:rounded-lg"
         />
@@ -171,9 +171,14 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
           <SkeletonCardList count={6} compact />
         ) : (
           <>
-            {/* Pinned: Home container */}
+            {/* Section: Home container */}
             {mainGroup && (
-              <div className="mb-2">
+              <div className="mb-1">
+                <div className="px-2 pt-1 pb-1.5">
+                  <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
+                    主工作区
+                  </span>
+                </div>
                 <ChatGroupItem
                   jid={mainGroup.jid}
                   name={mainGroup.name}
@@ -187,46 +192,52 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
                   onRename={(jid, name) => setRenameState({ open: true, jid, name })}
                   onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
                 />
-                <div className="mx-2 border-b" />
               </div>
             )}
 
-            {/* Other containers grouped by date */}
+            {/* Section: Work containers */}
             {groupedByDate.length === 0 && !mainGroup ? (
               <div className="flex flex-col items-center justify-center h-32 px-4">
                 <p className="text-sm text-muted-foreground text-center">
-                  {searchQuery ? '未找到匹配的容器' : '暂无容器'}
+                  {searchQuery ? '未找到匹配的工作区' : '暂无工作区'}
                 </p>
               </div>
-            ) : (
-              groupedByDate.map((section) => (
-                <div key={section.label} className="mb-2">
-                  <div className="px-2 pt-3 pb-1.5">
-                    <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
-                      {section.label}
-                    </span>
-                  </div>
-                  {section.items.map((g) => (
-                    <ChatGroupItem
-                      key={g.jid}
-                      jid={g.jid}
-                      name={g.name}
-                      folder={g.folder}
-                      lastMessage={g.lastMessage}
-                      executionMode={g.execution_mode}
-                      isActive={currentGroup === g.jid}
-                      isHome={false}
-                      editable={g.editable}
-                      deletable={g.deletable}
-                      onSelect={handleGroupSelect}
-                      onRename={(jid, name) => setRenameState({ open: true, jid, name })}
-                      onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
-                      onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
-                    />
-                  ))}
+            ) : groupedByDate.length > 0 ? (
+              <div>
+                <div className="px-2 pt-3 pb-1.5">
+                  <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
+                    工作区
+                  </span>
                 </div>
-              ))
-            )}
+                {groupedByDate.map((section) => (
+                  <div key={section.label} className="mb-1">
+                    <div className="px-2 pt-2 pb-1">
+                      <span className="text-[10px] text-muted-foreground/70 tracking-wide">
+                        {section.label}
+                      </span>
+                    </div>
+                    {section.items.map((g) => (
+                      <ChatGroupItem
+                        key={g.jid}
+                        jid={g.jid}
+                        name={g.name}
+                        folder={g.folder}
+                        lastMessage={g.lastMessage}
+                        executionMode={g.execution_mode}
+                        isActive={currentGroup === g.jid}
+                        isHome={false}
+                        editable={g.editable}
+                        deletable={g.deletable}
+                        onSelect={handleGroupSelect}
+                        onRename={(jid, name) => setRenameState({ open: true, jid, name })}
+                        onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
+                        onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </>
         )}
       </div>
@@ -250,7 +261,7 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
         onClose={() => setClearState({ open: false, jid: '', name: '' })}
         onConfirm={handleClearConfirm}
         title="重建工作区"
-        message={`确认重建容器「${clearState.name}」的工作区吗？这会清除全部聊天记录、上下文，并删除工作目录中的所有文件。此操作不可撤销。`}
+        message={`确认重建工作区「${clearState.name}」吗？这会清除全部聊天记录、上下文，并删除工作目录中的所有文件。此操作不可撤销。`}
         confirmText="确认重建"
         cancelText="取消"
         confirmVariant="danger"
@@ -261,8 +272,8 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
         open={deleteState.open}
         onClose={() => setDeleteState({ open: false, jid: '', name: '' })}
         onConfirm={handleDeleteConfirm}
-        title="删除容器"
-        message={`确认删除容器「${deleteState.name}」吗？此操作会彻底删除该容器的全部数据，包括聊天记录、工作目录文件和定时任务。此操作不可撤销。`}
+        title="删除工作区"
+        message={`确认删除工作区「${deleteState.name}」吗？此操作会彻底删除该工作区的全部数据，包括聊天记录、工作目录文件和定时任务。此操作不可撤销。`}
         confirmText="删除"
         cancelText="取消"
         confirmVariant="danger"

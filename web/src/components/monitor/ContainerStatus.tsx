@@ -17,7 +17,7 @@ export function ContainerStatus({ status }: ContainerStatusProps) {
           <Server className="w-6 h-6 text-primary" />
         </div>
         <div>
-          <h3 className="text-sm font-medium text-slate-500">活跃容器</h3>
+          <h3 className="text-sm font-medium text-slate-500">活跃工作区</h3>
           <p className="text-2xl font-bold text-slate-900">
             {status.activeContainers} / {maxConcurrent}
           </p>
@@ -39,9 +39,9 @@ export function ContainerStatus({ status }: ContainerStatusProps) {
       </div>
 
       <div className="mt-2 text-xs text-slate-500">
-        {percentage > 80 && '容器使用率较高'}
-        {percentage > 60 && percentage <= 80 && '容器使用正常'}
-        {percentage <= 60 && '容器资源充足'}
+        {percentage > 80 && '工作区使用率较高'}
+        {percentage > 60 && percentage <= 80 && '工作区使用正常'}
+        {percentage <= 60 && '工作区资源充足'}
       </div>
     </div>
   );

@@ -66,7 +66,7 @@ export function MonitorPage() {
                   ) : (
                     <>
                       <AlertTriangle className="w-5 h-5 text-red-500" />
-                      <span className="text-sm text-red-600 font-medium">镜像不存在，容器模式的会话流将无法运行</span>
+                      <span className="text-sm text-red-600 font-medium">镜像不存在，Docker 模式的工作区将无法运行</span>
                     </>
                   )}
                 </div>
@@ -148,7 +148,7 @@ export function MonitorPage() {
                           队列
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
-                          容器状态
+                          运行状态
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">
                           进程标识

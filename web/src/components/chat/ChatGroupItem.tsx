@@ -40,7 +40,7 @@ export function ChatGroupItem({
   onDelete,
 }: ChatGroupItemProps) {
   const currentUser = useAuthStore((s) => s.user);
-  const defaultHomeName = currentUser?.role === 'admin' ? '主容器' : '我的工作区';
+  const defaultHomeName = '我的工作区';
   // Use actual name if it's been renamed, otherwise fall back to default
   const isDefaultName = !name || name === 'Main' || name === `${currentUser?.username} Home`;
   const displayName = isHome && isDefaultName ? defaultHomeName : name;
@@ -74,11 +74,15 @@ export function ChatGroupItem({
           >
             {displayName}
           </span>
-          {executionMode === 'host' && (
+          {executionMode === 'host' ? (
             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700">
               宿主机
             </span>
-          )}
+          ) : executionMode === 'container' ? (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-100 text-sky-700">
+              Docker
+            </span>
+          ) : null}
         </div>
         {truncatedMsg && (
           <p className={cn('text-xs text-muted-foreground/70 truncate mt-0.5', isHome && 'pl-5')}>

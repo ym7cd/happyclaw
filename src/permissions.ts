@@ -31,7 +31,7 @@ export const PERMISSION_TEMPLATES: Record<
   },
   ops_manager: {
     key: 'ops_manager',
-    label: '运维管理员（配置+容器环境）',
+    label: '运维管理员（配置+工作区环境）',
     role: 'member',
     permissions: ['manage_system_config', 'manage_group_env'],
   },

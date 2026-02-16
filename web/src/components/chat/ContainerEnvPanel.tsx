@@ -99,7 +99,7 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
-        <h3 className="font-semibold text-slate-900 text-sm">容器环境变量</h3>
+        <h3 className="font-semibold text-slate-900 text-sm">工作区环境变量</h3>
         <div className="flex items-center gap-1">
           <button
             onClick={() => loadConfig(groupJid)}
@@ -122,7 +122,7 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
         <p className="text-[11px] text-slate-400 leading-relaxed">
-          覆盖全局 Claude 配置，仅对当前容器生效。留空则使用全局配置。保存后容器将自动重建。
+          覆盖全局 Claude 配置，仅对当前工作区生效。留空则使用全局配置。保存后工作区将自动重建。
         </p>
 
         {/* Claude Provider Fields */}
@@ -218,11 +218,11 @@ export function ContainerEnvPanel({ groupJid, onClose }: ContainerEnvPanelProps)
         <Button onClick={handleSave} disabled={saving} className="w-full" size="sm">
           {saving && <Loader2 className="size-4 animate-spin" />}
           <Save className="w-4 h-4" />
-          {saveSuccess ? '已保存' : '保存并重建容器'}
+          {saveSuccess ? '已保存' : '保存并重建工作区'}
         </Button>
         {saveSuccess && (
           <p className="text-[11px] text-primary text-center mt-1.5">
-            配置已保存，容器已重建
+            配置已保存，工作区已重建
           </p>
         )}
       </div>

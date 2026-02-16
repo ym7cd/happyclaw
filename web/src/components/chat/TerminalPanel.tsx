@@ -135,13 +135,13 @@ export function TerminalPanel({
     const unsubError = wsManager.on('terminal_error', (data: any) => {
       if (data.chatJid === groupJid) {
         syncConnState('disconnected');
-        // 针对容器未运行的错误给出更友好的提示
-        if (data.error?.includes('容器未运行')) {
-          terminal.write(`\r\n\x1b[33m[容器启动中...]\x1b[0m\r\n`);
-          terminal.write(`\r\n已自动尝试启动容器，请稍后点击"重新连接"。\r\n`);
-        } else if (data.error?.includes('容器启动中')) {
-          terminal.write(`\r\n\x1b[33m[容器启动中...]\x1b[0m\r\n`);
-          terminal.write(`\r\n容器正在启动，请稍后点击"重新连接"。\r\n`);
+        // 针对工作区未运行的错误给出更友好的提示
+        if (data.error?.includes('工作区未运行')) {
+          terminal.write(`\r\n\x1b[33m[工作区启动中...]\x1b[0m\r\n`);
+          terminal.write(`\r\n已自动尝试启动工作区，请稍后点击"重新连接"。\r\n`);
+        } else if (data.error?.includes('工作区启动中')) {
+          terminal.write(`\r\n\x1b[33m[工作区启动中...]\x1b[0m\r\n`);
+          terminal.write(`\r\n工作区正在启动，请稍后点击"重新连接"。\r\n`);
         } else {
           terminal.write(`\r\n\x1b[31m[错误: ${data.error}]\x1b[0m\r\n`);
         }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageList } from './MessageList';
@@ -8,7 +9,7 @@ import { FilePanel } from './FilePanel';
 import { ContainerEnvPanel } from './ContainerEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
-import { ArrowLeft, MoreHorizontal, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { ArrowLeft, Link, MoreHorizontal, PanelRightClose, PanelRightOpen, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { wsManager } from '../../api/ws';
 import { api } from '../../api/client';
@@ -39,6 +40,10 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
   const [mobileTerminal, setMobileTerminal] = useState(false);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const [imStatus, setImStatus] = useState<{ feishu: boolean; telegram: boolean } | null>(null);
+  const [imBannerDismissed, setImBannerDismissed] = useState(() =>
+    localStorage.getItem('im-banner-dismissed') === '1',
+  );
+  const navigate = useNavigate();
 
   // Drag state refs (not reactive — only used in event handlers)
   const containerRef = useRef<HTMLDivElement>(null);
@@ -284,7 +289,15 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
         <div className="flex-1 min-w-0">
           <h2 className="font-semibold text-slate-900 text-[15px] truncate">{group.name}</h2>
           <div className="flex items-center gap-1.5 text-xs text-slate-500">
-            <span>{isWaiting ? '正在思考...' : group.is_home ? '主容器' : '容器'}</span>
+            <span>{isWaiting ? '正在思考...' : group.is_home ? '主工作区' : '工作区'}</span>
+            {!isWaiting && group.execution_mode && (
+              <>
+                <span className="text-slate-300">·</span>
+                <span className={`inline-flex items-center px-1 py-px rounded text-[10px] font-medium ${group.execution_mode === 'host' ? 'bg-amber-100 text-amber-700' : 'bg-sky-100 text-sky-700'}`}>
+                  {group.execution_mode === 'host' ? '宿主机' : 'Docker'}
+                </span>
+              </>
+            )}
             {isOwnHome && imStatus && (imStatus.feishu || imStatus.telegram) && (
               <>
                 <span className="text-slate-300">·</span>
@@ -325,6 +338,30 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
           </button>
         </div>
       </div>
+
+      {/* IM channel setup banner for home container without IM */}
+      {isOwnHome && imStatus && !imStatus.feishu && !imStatus.telegram && !imBannerDismissed && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800 text-sm">
+          <Link className="w-4 h-4 flex-shrink-0" />
+          <span className="flex-1 min-w-0">未配置 IM 渠道，飞书 / Telegram 消息无法与主工作区互通</span>
+          <button
+            onClick={() => navigate('/setup/channels')}
+            className="flex-shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-amber-600 text-white hover:bg-amber-700 transition-colors cursor-pointer"
+          >
+            去配置
+          </button>
+          <button
+            onClick={() => {
+              setImBannerDismissed(true);
+              localStorage.setItem('im-banner-dismissed', '1');
+            }}
+            className="flex-shrink-0 p-0.5 rounded hover:bg-amber-200/60 transition-colors cursor-pointer"
+            aria-label="关闭"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Main Content: Messages + Sidebar */}
       <div className="flex-1 flex overflow-hidden min-h-0">
@@ -437,7 +474,7 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
       <Sheet open={mobilePanel === 'env'} onOpenChange={(v) => !v && setMobilePanel(null)}>
         <SheetContent side="bottom" className="h-[80dvh] p-0">
           <SheetHeader className="px-4 pt-4 pb-2">
-            <SheetTitle>容器环境变量</SheetTitle>
+            <SheetTitle>工作区环境变量</SheetTitle>
           </SheetHeader>
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
             <ContainerEnvPanel
@@ -469,7 +506,7 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
       <Sheet open={mobileActionsOpen} onOpenChange={(v) => !v && setMobileActionsOpen(false)}>
         <SheetContent side="bottom" className="pb-[env(safe-area-inset-bottom)]">
           <SheetHeader>
-            <SheetTitle>容器操作</SheetTitle>
+            <SheetTitle>工作区操作</SheetTitle>
           </SheetHeader>
           <div className="space-y-2 pt-2">
             <button
@@ -505,7 +542,7 @@ export function ChatView({ groupJid, onBack }: ChatViewProps) {
         onClose={() => setShowResetConfirm(false)}
         onConfirm={handleResetSession}
         title="清除上下文"
-        message="将清除 Claude 会话上下文并停止运行中的容器，下次发送消息时将开始全新会话。聊天记录不受影响。"
+        message="将清除 Claude 会话上下文并停止运行中的工作区进程，下次发送消息时将开始全新会话。聊天记录不受影响。"
         confirmText="清除"
         confirmVariant="danger"
         loading={resetLoading}

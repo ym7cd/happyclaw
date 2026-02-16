@@ -466,7 +466,7 @@ function setupWebSocket(server: any): WebSocketServer {
                 JSON.stringify({
                   type: 'terminal_error',
                   chatJid,
-                  error: '容器启动中，请稍后重试',
+                  error: '工作区启动中，请稍后重试',
                 }),
               );
               return;
@@ -476,7 +476,7 @@ function setupWebSocket(server: any): WebSocketServer {
                 JSON.stringify({
                   type: 'terminal_error',
                   chatJid,
-                  error: '容器启动中，请稍后重试',
+                  error: '工作区启动中，请稍后重试',
                 }),
               );
               return;
@@ -818,7 +818,7 @@ export function startWebServer(webDeps: WebDeps): void {
         releaseTerminalOwnership(ownerWs, groupJid);
         if (ownerWs.readyState === WebSocket.OPEN) {
           ownerWs.send(
-            JSON.stringify({ type: 'terminal_stopped', chatJid: groupJid, reason: '容器已停止' }),
+            JSON.stringify({ type: 'terminal_stopped', chatJid: groupJid, reason: '工作区已停止' }),
           );
         }
       }

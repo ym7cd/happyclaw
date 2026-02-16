@@ -151,7 +151,7 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
     try {
       const result = await api.post<ClaudeApplyResult>('/api/config/claude/apply');
       if (result.success) {
-        setNotice(`已应用配置并停止 ${result.stoppedCount} 个会话流的活动容器`);
+        setNotice(`已应用配置并停止 ${result.stoppedCount} 个活动工作区`);
       } else {
         const suffix = typeof result.failedCount === 'number' ? `（失败 ${result.failedCount} 个）` : '';
         setError(result.error || `应用配置部分失败${suffix}`);
@@ -319,7 +319,7 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
         <Button variant="destructive" onClick={handleApply} disabled={loading || saving || applying}>
           {applying && <Loader2 className="size-4 animate-spin" />}
           <Rocket className="w-4 h-4" />
-          应用到所有容器
+          应用到所有工作区
         </Button>
       </div>
 
@@ -329,8 +329,8 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
         open={showApplyConfirm}
         onClose={() => setShowApplyConfirm(false)}
         onConfirm={doApply}
-        title="应用配置到所有容器"
-        message="这会停止所有会话流的活动容器并清空其待处理队列，是否继续？"
+        title="应用配置到所有工作区"
+        message="这会停止所有活动工作区并清空其待处理队列，是否继续？"
         confirmText="确认应用"
         confirmVariant="danger"
         loading={applying}

@@ -71,7 +71,7 @@ export function ChatPage() {
               欢迎使用 {appearance?.appName || 'HappyClaw'}
             </h2>
             <p className="text-slate-500 text-sm">
-              从左侧选择一个容器开始对话
+              从左侧选择一个工作区开始对话
             </p>
           </div>
         </div>

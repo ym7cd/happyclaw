@@ -17,7 +17,7 @@ export function samePermissions(left: Permission[], right: Permission[]): boolea
 
 export const PERMISSION_LABELS: Record<Permission, string> = {
   manage_system_config: '系统配置管理',
-  manage_group_env: '容器环境管理',
+  manage_group_env: '工作区环境管理',
   manage_users: '用户管理',
   manage_invites: '邀请码管理',
   view_audit_log: '查看审计日志',

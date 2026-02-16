@@ -98,18 +98,18 @@ export function CreateContainerDialog({
     <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>新建容器</DialogTitle>
+          <DialogTitle>新建工作区</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4">
           {/* Name input */}
           <div>
-            <label className="block text-sm font-medium mb-2">容器名称</label>
+            <label className="block text-sm font-medium mb-2">工作区名称</label>
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleConfirm(); }}
-              placeholder="输入容器名称"
+              placeholder="输入工作区名称"
               autoFocus
             />
           </div>
@@ -142,10 +142,10 @@ export function CreateContainerDialog({
                       <div>
                         <div className="flex items-center gap-1.5">
                           <Box className="w-4 h-4 text-muted-foreground" />
-                          <span className="text-sm font-medium">容器模式</span>
+                          <span className="text-sm font-medium">Docker 模式</span>
                           <span className="text-xs text-primary font-medium">推荐</span>
                         </div>
-                        <p className="text-xs text-muted-foreground mt-0.5">在隔离的 Docker 容器中执行</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">在隔离的 Docker 环境中执行</p>
                       </div>
                     </label>
                     <label className={`flex items-start gap-3 p-2 rounded-lg border transition-colors ${canHostExec ? 'cursor-pointer hover:bg-accent/50' : 'opacity-50 cursor-not-allowed'}`}>
@@ -191,7 +191,7 @@ export function CreateContainerDialog({
                               <FolderInput className="w-4 h-4 text-muted-foreground" />
                               <span className="text-sm font-medium">复制本地目录</span>
                             </div>
-                            <p className="text-xs text-muted-foreground mt-0.5">将宿主机目录复制到容器工作区（隔离副本）</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">将宿主机目录复制到工作区（隔离副本）</p>
                           </div>
                         </label>
                       )}
@@ -207,7 +207,7 @@ export function CreateContainerDialog({
                             <GitBranch className="w-4 h-4 text-muted-foreground" />
                             <span className="text-sm font-medium">克隆 Git 仓库</span>
                           </div>
-                          <p className="text-xs text-muted-foreground mt-0.5">从 GitHub 等平台克隆仓库到容器工作区</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">从 GitHub 等平台克隆仓库到工作区</p>
                         </div>
                       </label>
                       {initMode === 'git' && (
