@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="#happyclaw-是什么">介绍</a> · <a href="#核心能力">核心能力</a> · <a href="#项目对比">项目对比</a> · <a href="#快速开始">快速开始</a> · <a href="#技术架构">技术架构</a> · <a href="#贡献">贡献</a>
+  <a href="#happyclaw-是什么">介绍</a> · <a href="#核心能力">核心能力</a> · <a href="#快速开始">快速开始</a> · <a href="#技术架构">技术架构</a> · <a href="#贡献">贡献</a>
 </p>
 
 ---
@@ -171,14 +171,6 @@ Agent 自主维护跨会话的持久记忆：
 | **终端权限** | 用户可访问自己容器的 Web 终端（宿主机模式不支持） |
 | **登录保护** | 5 次失败锁定 15 分钟，bcrypt 12 轮，HMAC Cookie，30 天会话有效期 |
 | **PWA** | 一键安装到手机桌面，移动端深度优化，随时随地使用 AI Agent |
-
-## 项目对比
-
-目前社区中有几个类似定位的开源项目，各有侧重：
-
-[OpenClaw](https://github.com/nicepkg/OpenClaw) 是一个面向个人用户的 AI Agent 助手，同样基于 Claude Agent SDK 构建，支持飞书、微信、Telegram、Discord、Slack 等广泛的 IM 渠道。如果你是单人使用且需要接入多种聊天工具，OpenClaw 是很好的选择。HappyClaw 与之相比更侧重多用户场景——per-user 工作区隔离、RBAC 权限体系、审计日志、飞书 WebSocket 长连接（而非 Webhook），以及定时任务、Web Terminal、Skills 系统等面向团队的功能。
-
-[Happy Coder](https://github.com/avivace/happy-coder) 专注于 Claude Code 的移动端远程控制，提供语音交互和端到端加密（SRP + AES-GCM），专为手机端设计。如果你已有 Claude Code 环境、主要需求是在手机上远程操控，Happy Coder 更加轻量和专注。HappyClaw 则提供完整的 Agent 执行环境（Docker 容器隔离 + 宿主机双模式）、多层级记忆系统和浏览器自动化等更丰富的功能。
 
 ## 快速开始
 
