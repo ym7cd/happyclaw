@@ -120,6 +120,7 @@ export const MessageCreateSchema = z
 export const GroupCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
   execution_mode: z.enum(['container', 'host']).optional(),
+  model_provider: z.enum(['claude', 'codex']).optional(),
   custom_cwd: z
     .string()
     .optional()
@@ -195,6 +196,7 @@ export const GroupPatchSchema = z.object({
     .enum(['auto', 'always', 'when_mentioned', 'disabled'])
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
+  model_provider: z.enum(['claude', 'codex']).optional(),
 });
 
 export const LoginSchema = z.object({
@@ -385,6 +387,26 @@ export const FeishuConfigSchema = z
       typeof data.appSecret === 'string' ||
       data.clearAppSecret === true ||
       typeof data.enabled === 'boolean',
+    { message: 'At least one config field must be provided' },
+  );
+
+export const CodexConfigSchema = z
+  .object({
+    authJson: z.string().max(100000).optional(),
+    configToml: z.string().max(100000).optional(),
+    openaiApiKey: z.string().max(2000).optional(),
+    clearAuthJson: z.boolean().optional(),
+    clearConfigToml: z.boolean().optional(),
+    clearOpenaiApiKey: z.boolean().optional(),
+  })
+  .refine(
+    (data) =>
+      typeof data.authJson === 'string' ||
+      typeof data.configToml === 'string' ||
+      typeof data.openaiApiKey === 'string' ||
+      data.clearAuthJson === true ||
+      data.clearConfigToml === true ||
+      data.clearOpenaiApiKey === true,
     { message: 'At least one config field must be provided' },
   );
 

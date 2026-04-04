@@ -54,6 +54,16 @@ export interface ClaudeApplyResult {
   error?: string;
 }
 
+export interface CodexConfigPublic {
+  hasAuthJson: boolean;
+  hasConfigToml: boolean;
+  hasOpenaiApiKey: boolean;
+  openaiApiKeyMasked: string | null;
+  updatedAt: string | null;
+  source: 'runtime' | 'env' | 'home' | 'none';
+  homePath: string;
+}
+
 // ─── 兼容旧类型（仍被 GET /claude 返回） ────────────────────
 
 export interface ClaudeConfigPublic {
@@ -106,7 +116,7 @@ export interface SystemSettings {
   billingCurrencyRate: number;
 }
 
-export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor';
+export type SettingsTab = 'claude' | 'codex' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor';
 
 export function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {

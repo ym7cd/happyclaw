@@ -8,6 +8,8 @@ import {
   FolderInput,
   GitBranch,
   Loader2,
+  Bot,
+  Code2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -38,6 +40,7 @@ export function CreateContainerDialog({
   const [loading, setLoading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [executionMode, setExecutionMode] = useState<'container' | 'host'>('container');
+  const [modelProvider, setModelProvider] = useState<'claude' | 'codex'>('claude');
   const [customCwd, setCustomCwd] = useState('');
   const [initMode, setInitMode] = useState<'empty' | 'local' | 'git'>('empty');
   const [initSourcePath, setInitSourcePath] = useState('');
@@ -50,6 +53,7 @@ export function CreateContainerDialog({
     setName('');
     setAdvancedOpen(false);
     setExecutionMode('container');
+    setModelProvider('claude');
     setCustomCwd('');
     setInitMode('empty');
     setInitSourcePath('');
@@ -68,6 +72,7 @@ export function CreateContainerDialog({
     setLoading(true);
     try {
       const options: Record<string, string> = {};
+      options.model_provider = modelProvider;
       if (executionMode === 'host') {
         options.execution_mode = 'host';
         if (customCwd.trim()) options.custom_cwd = customCwd.trim();
@@ -124,8 +129,49 @@ export function CreateContainerDialog({
             </button>
             {advancedOpen && (
               <div className="px-3 pb-3 space-y-3 border-t">
-                {/* Execution mode */}
                 <div className="pt-3">
+                  <label className="block text-sm font-medium mb-2">模型 Provider</label>
+                  <div className="space-y-2">
+                    <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                      <input
+                        type="radio"
+                        name="model_provider"
+                        value="claude"
+                        checked={modelProvider === 'claude'}
+                        onChange={() => setModelProvider('claude')}
+                        className="mt-0.5 accent-primary"
+                      />
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <Bot className="w-4 h-4 text-muted-foreground" />
+                          <span className="text-sm font-medium">Claude</span>
+                          <span className="text-xs text-primary font-medium">默认</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-0.5">保持当前稳定链路，兼容旧数据</p>
+                      </div>
+                    </label>
+                    <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                      <input
+                        type="radio"
+                        name="model_provider"
+                        value="codex"
+                        checked={modelProvider === 'codex'}
+                        onChange={() => setModelProvider('codex')}
+                        className="mt-0.5 accent-primary"
+                      />
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <Code2 className="w-4 h-4 text-muted-foreground" />
+                            <span className="text-sm font-medium">Codex</span>
+                          </div>
+                        <p className="text-xs text-muted-foreground mt-0.5">使用独立 codex-runner，支持 `.codex` 会话目录与共享 MCP 工具</p>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Execution mode */}
+                <div className="pt-1">
                   <label className="block text-sm font-medium mb-2">执行模式</label>
                   <div className="space-y-2">
                     <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">

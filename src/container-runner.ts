@@ -13,7 +13,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR } from './config.js';
+import {
+  CLAUDE_CONTAINER_IMAGE,
+  CODEX_CONTAINER_IMAGE,
+  DATA_DIR,
+  GROUPS_DIR,
+} from './config.js';
 import { logger } from './logger.js';
 import {
   loadMountAllowlist,
@@ -23,6 +28,8 @@ import {
   buildContainerEnvLines,
   getClaudeProviderConfig,
   getContainerEnvConfig,
+  getCodexRuntimeEnvVars,
+  getEffectiveCodexHomeDir,
   getEnabledProviders,
   getBalancingConfig,
   getSystemSettings,
@@ -35,7 +42,12 @@ import { providerPool } from './provider-pool.js';
 import { isApiError } from './agent-output-parser.js';
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { loadUserMcpServers } from './mcp-utils.js';
-import { MessageSourceKind, RegisteredGroup, StreamEvent } from './types.js';
+import {
+  MessageSourceKind,
+  ModelProvider,
+  RegisteredGroup,
+  StreamEvent,
+} from './types.js';
 import {
   attachStderrHandler,
   attachStdoutHandler,
@@ -153,6 +165,194 @@ interface ResolvedProvider {
   customEnv: Record<string, string>;
 }
 
+interface HostRunnerDescriptor {
+  provider: ModelProvider;
+  sessionDirName: '.claude' | '.codex';
+  runnerRoot: string;
+  distEntry: string;
+  sharedToolsModulePath: string;
+  mcpServerEntryPath: string;
+  setupBuildHint: string;
+  setupInstallHint?: string;
+  customEntry: boolean;
+}
+
+interface ContainerRunnerDescriptor {
+  provider: ModelProvider;
+  sessionDirName: '.claude' | '.codex';
+  sessionHomePath: '/home/node/.claude' | '/home/node/.codex';
+  imageName: string;
+  runnerAppDir: '/app' | '/app-codex';
+  runnerSrcDir: string;
+  sharedToolsModulePath: string;
+  mcpServerEntryPath: string;
+}
+
+const CODEX_SHARED_HOME_ENTRIES = [
+  'auth.json',
+  'config.toml',
+  'AGENTS.md',
+  'rules',
+  'agents',
+] as const;
+const DEFAULT_CODEX_BIN_CONTAINER_PATH = '/tmp/happyclaw-codex-bin';
+const DEFAULT_CODEX_BIN_SCRIPT_CONTAINER_PATH = '/tmp/happyclaw-codex-script.cjs';
+
+function normalizeModelProvider(modelProvider?: string): ModelProvider {
+  if (modelProvider === undefined || modelProvider === 'claude') {
+    return 'claude';
+  }
+  if (modelProvider === 'codex') {
+    return 'codex';
+  }
+  throw new Error(`Unsupported model provider: ${modelProvider}`);
+}
+
+function getHostRunnerDescriptor(
+  modelProvider?: string,
+): HostRunnerDescriptor {
+  const provider = normalizeModelProvider(modelProvider);
+  const projectRoot = process.cwd();
+  const sharedToolsModulePath = path.join(
+    projectRoot,
+    'container',
+    'shared',
+    'mcp-tool-specs.cjs',
+  );
+  const mcpServerEntryPath = path.join(
+    projectRoot,
+    'container',
+    'shared',
+    'mcp-server.cjs',
+  );
+  const overrideEntry = provider === 'codex'
+    ? process.env.HAPPYCLAW_CODEX_RUNNER_ENTRY
+    : process.env.HAPPYCLAW_CLAUDE_RUNNER_ENTRY;
+
+  if (overrideEntry) {
+    const distEntry = path.resolve(overrideEntry);
+    return {
+      provider,
+      sessionDirName: provider === 'codex' ? '.codex' : '.claude',
+      runnerRoot: path.dirname(distEntry),
+      distEntry,
+      sharedToolsModulePath,
+      mcpServerEntryPath,
+      setupBuildHint: `使用自定义 ${provider} runner entry：${distEntry}`,
+      setupInstallHint: undefined,
+      customEntry: true,
+    };
+  }
+
+  if (provider === 'codex') {
+    const runnerRoot = path.join(projectRoot, 'container', 'codex-runner');
+    return {
+      provider,
+      sessionDirName: '.codex',
+      runnerRoot,
+      distEntry: path.join(runnerRoot, 'dist', 'index.js'),
+      sharedToolsModulePath,
+      mcpServerEntryPath,
+      setupBuildHint: 'npm --prefix container/codex-runner run build',
+      setupInstallHint: 'npm --prefix container/codex-runner install',
+      customEntry: false,
+    };
+  }
+
+  const runnerRoot = path.join(projectRoot, 'container', 'agent-runner');
+  return {
+    provider,
+    sessionDirName: '.claude',
+    runnerRoot,
+    distEntry: path.join(runnerRoot, 'dist', 'index.js'),
+    sharedToolsModulePath,
+    mcpServerEntryPath,
+    setupBuildHint: 'npm --prefix container/agent-runner run build',
+    setupInstallHint: 'npm --prefix container/agent-runner install',
+    customEntry: false,
+  };
+}
+
+function getContainerRunnerDescriptor(
+  modelProvider?: string,
+): ContainerRunnerDescriptor {
+  const provider = normalizeModelProvider(modelProvider);
+  const projectRoot = process.cwd();
+
+  if (provider === 'codex') {
+    return {
+      provider,
+      sessionDirName: '.codex',
+      sessionHomePath: '/home/node/.codex',
+      imageName: CODEX_CONTAINER_IMAGE,
+      runnerAppDir: '/app-codex',
+      runnerSrcDir: path.join(projectRoot, 'container', 'codex-runner', 'src'),
+      sharedToolsModulePath: '/app/shared/mcp-tool-specs.cjs',
+      mcpServerEntryPath: '/app/shared/mcp-server.cjs',
+    };
+  }
+
+  return {
+    provider,
+    sessionDirName: '.claude',
+    sessionHomePath: '/home/node/.claude',
+    imageName: CLAUDE_CONTAINER_IMAGE,
+    runnerAppDir: '/app',
+    runnerSrcDir: path.join(projectRoot, 'container', 'agent-runner', 'src'),
+    sharedToolsModulePath: '/app/shared/mcp-tool-specs.cjs',
+    mcpServerEntryPath: '/app/shared/mcp-server.cjs',
+  };
+}
+
+function ensureSymlink(targetPath: string, linkPath: string): void {
+  try {
+    const existing = fs.lstatSync(linkPath);
+    if (existing.isSymbolicLink()) {
+      const currentTarget = fs.readlinkSync(linkPath);
+      const resolvedCurrent = path.resolve(path.dirname(linkPath), currentTarget);
+      if (resolvedCurrent === targetPath) return;
+    }
+    fs.rmSync(linkPath, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+
+  fs.symlinkSync(targetPath, linkPath);
+}
+
+function ensureCodexHomeBootstrap(groupSessionsDir: string): void {
+  const sourceCodexHome = getEffectiveCodexHomeDir();
+
+  fs.mkdirSync(groupSessionsDir, { recursive: true });
+  for (const entry of CODEX_SHARED_HOME_ENTRIES) {
+    const sourcePath = path.join(sourceCodexHome, entry);
+    const linkPath = path.join(groupSessionsDir, entry);
+    if (sourcePath === linkPath) continue;
+    if (!fs.existsSync(sourcePath)) continue;
+    ensureSymlink(sourcePath, linkPath);
+  }
+}
+
+function withProviderAnnotatedOutput(
+  provider: ModelProvider,
+  onOutput?: (output: ContainerOutput) => Promise<void>,
+): ((output: ContainerOutput) => Promise<void>) | undefined {
+  if (!onOutput) return undefined;
+  return async (output: ContainerOutput) => {
+    if (output.status === 'stream' && output.streamEvent) {
+      await onOutput({
+        ...output,
+        streamEvent: {
+          ...output.streamEvent,
+          provider,
+        } as StreamEvent,
+      });
+      return;
+    }
+    await onOutput(output);
+  };
+}
+
 /**
  * Try to select a provider from the pool. Returns profileId + resolved config,
  * or null if pool mode is off (≤1 enabled) / group has provider override / selection fails.
@@ -191,6 +391,7 @@ function trySelectPoolProvider(
 
 function buildVolumeMounts(
   group: RegisteredGroup,
+  descriptor: ContainerRunnerDescriptor,
   isAdminHome: boolean,
   mountUserSkills = true,
   agentId?: string,
@@ -258,8 +459,8 @@ function buildVolumeMounts(
     readonly: !group.is_home,
   });
 
-  // Per-group Claude sessions directory (isolated from other groups)
-  // Sub-agents get their own session dir under agents/{agentId}/.claude/
+  // Per-group provider session directory (isolated from other groups)
+  // Sub-agents get their own session dir under agents/{agentId}/.{provider}/
   const groupSessionsDir = agentId
     ? path.join(
         DATA_DIR,
@@ -267,19 +468,61 @@ function buildVolumeMounts(
         group.folder,
         'agents',
         agentId,
-        '.claude',
+        descriptor.sessionDirName,
       )
-    : path.join(DATA_DIR, 'sessions', group.folder, '.claude');
+    : path.join(DATA_DIR, 'sessions', group.folder, descriptor.sessionDirName);
   mkdirForContainer(groupSessionsDir);
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const mcpServers = ownerId ? loadUserMcpServers(ownerId) : {};
-  ensureSettingsJson(settingsFile, mcpServers);
 
   mounts.push({
     hostPath: groupSessionsDir,
-    containerPath: '/home/node/.claude',
+    containerPath: descriptor.sessionHomePath,
     readonly: false,
   });
+
+  if (descriptor.provider === 'claude') {
+    const settingsFile = path.join(groupSessionsDir, 'settings.json');
+    const mcpServers = ownerId ? loadUserMcpServers(ownerId) : {};
+    ensureSettingsJson(settingsFile, mcpServers);
+  } else {
+    const sourceCodexHome = getEffectiveCodexHomeDir();
+    for (const entry of CODEX_SHARED_HOME_ENTRIES) {
+      const sourcePath = path.join(sourceCodexHome, entry);
+      if (!fs.existsSync(sourcePath)) continue;
+      mounts.push({
+        hostPath: sourcePath,
+        containerPath: path.posix.join(descriptor.sessionHomePath, entry),
+        readonly: true,
+      });
+    }
+
+    const codexBinHostPath = process.env.HAPPYCLAW_CODEX_BIN_HOST_PATH;
+    const codexBinScriptHostPath =
+      process.env.HAPPYCLAW_CODEX_BIN_SCRIPT_HOST_PATH;
+    if (codexBinHostPath) {
+      const resolvedCodexBinHostPath = path.resolve(codexBinHostPath);
+      if (fs.existsSync(resolvedCodexBinHostPath)) {
+        mounts.push({
+          hostPath: resolvedCodexBinHostPath,
+          containerPath:
+            process.env.HAPPYCLAW_CODEX_BIN_CONTAINER_PATH ||
+            DEFAULT_CODEX_BIN_CONTAINER_PATH,
+          readonly: true,
+        });
+      }
+    }
+    if (codexBinScriptHostPath) {
+      const resolvedCodexBinScriptHostPath = path.resolve(codexBinScriptHostPath);
+      if (fs.existsSync(resolvedCodexBinScriptHostPath)) {
+        mounts.push({
+          hostPath: resolvedCodexBinScriptHostPath,
+          containerPath:
+            process.env.HAPPYCLAW_CODEX_BIN_SCRIPT_CONTAINER_PATH ||
+            DEFAULT_CODEX_BIN_SCRIPT_CONTAINER_PATH,
+          readonly: true,
+        });
+      }
+    }
+  }
 
   // Skills：以只读卷挂载宿主机目录（由 entrypoint 创建符号链接）
   // 用户的所有 skills 在其所有工作区中全量生效
@@ -337,61 +580,55 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Per-container environment file (keeps credentials out of process listings)
-  // Global config merged with per-container overrides.
-  const envDir = path.join(DATA_DIR, 'env', group.folder);
-  fs.mkdirSync(envDir, { recursive: true });
-  const globalConfig = resolvedProvider?.config ?? getClaudeProviderConfig();
-  const containerOverride = getContainerEnvConfig(group.folder);
-  const envLines = buildContainerEnvLines(
-    globalConfig,
-    containerOverride,
-    resolvedProvider?.customEnv,
-  );
-  if (envLines.length > 0) {
-    const envFilePath = path.join(envDir, 'env');
-    const quotedLines = shellQuoteEnvLines(envLines);
-    fs.writeFileSync(envFilePath, quotedLines.join('\n') + '\n', {
-      mode: 0o600,
-    });
-    try {
-      fs.chmodSync(envFilePath, 0o600);
-    } catch (err) {
-      logger.warn(
-        { group: group.name, err },
-        'Failed to enforce env file permissions',
-      );
+  if (descriptor.provider === 'claude') {
+    // Per-container environment file (keeps credentials out of process listings)
+    // Global config merged with per-container overrides.
+    const envDir = path.join(DATA_DIR, 'env', group.folder);
+    fs.mkdirSync(envDir, { recursive: true });
+    const globalConfig = resolvedProvider?.config ?? getClaudeProviderConfig();
+    const containerOverride = getContainerEnvConfig(group.folder);
+    const envLines = buildContainerEnvLines(
+      globalConfig,
+      containerOverride,
+      resolvedProvider?.customEnv,
+    );
+    if (envLines.length > 0) {
+      const envFilePath = path.join(envDir, 'env');
+      const quotedLines = shellQuoteEnvLines(envLines);
+      fs.writeFileSync(envFilePath, quotedLines.join('\n') + '\n', {
+        mode: 0o600,
+      });
+      try {
+        fs.chmodSync(envFilePath, 0o600);
+      } catch (err) {
+        logger.warn(
+          { group: group.name, err },
+          'Failed to enforce env file permissions',
+        );
+      }
+      mounts.push({
+        hostPath: envDir,
+        containerPath: '/workspace/env-dir',
+        readonly: true,
+      });
     }
-    mounts.push({
-      hostPath: envDir,
-      containerPath: '/workspace/env-dir',
-      readonly: true,
-    });
+
+    // Write .credentials.json for OAuth credentials (session dir is already mounted)
+    const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
+    if (mergedConfig.claudeOAuthCredentials) {
+      try {
+        writeCredentialsFile(groupSessionsDir, mergedConfig);
+      } catch (err) {
+        logger.warn(
+          { group: group.name, err },
+          'Failed to write .credentials.json',
+        );
+      }
+    }
   }
 
-  // Write .credentials.json for OAuth credentials (session dir is already mounted)
-  const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
-  if (mergedConfig.claudeOAuthCredentials) {
-    try {
-      writeCredentialsFile(groupSessionsDir, mergedConfig);
-    } catch (err) {
-      logger.warn(
-        { group: group.name, err },
-        'Failed to write .credentials.json',
-      );
-    }
-  }
-
-  // Mount agent-runner source from host — recompiled on container startup.
-  // Bypasses Docker 镜像构建缓存，确保代码变更生效。
-  const agentRunnerSrc = path.join(
-    projectRoot,
-    'container',
-    'agent-runner',
-    'src',
-  );
   mounts.push({
-    hostPath: agentRunnerSrc,
+    hostPath: descriptor.runnerSrcDir,
     containerPath: '/app/src',
     readonly: true,
   });
@@ -399,7 +636,8 @@ function buildVolumeMounts(
   // Admin's ~/.claude/ config: mount CLAUDE.md and rules/ into /workspace/
   // so the SDK's directory traversal (cwd → root) discovers them at /workspace/ level.
   // Only for admin-created workspaces (ownerHomeFolder === 'main').
-  const isCreatorAdmin = ownerHomeFolder === 'main';
+  const isCreatorAdmin =
+    descriptor.provider === 'claude' && ownerHomeFolder === 'main';
   if (isCreatorAdmin) {
     const hostClaudeDir = path.join(os.homedir(), '.claude');
     const hostClaudeMd = path.join(hostClaudeDir, 'CLAUDE.md');
@@ -437,8 +675,49 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  descriptor: ContainerRunnerDescriptor,
+  runtimeEnv: Record<string, string>,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  args.push('-e', `HAPPYCLAW_MODEL_PROVIDER=${descriptor.provider}`);
+  args.push('-e', `HAPPYCLAW_AGENT_HOME=${descriptor.sessionHomePath}`);
+  args.push('-e', `HAPPYCLAW_RUNNER_APP_DIR=${descriptor.runnerAppDir}`);
+  args.push(
+    '-e',
+    `HAPPYCLAW_SHARED_MCP_TOOLS_MODULE=${descriptor.sharedToolsModulePath}`,
+  );
+  args.push('-e', `HAPPYCLAW_MCP_SERVER_ENTRY=${descriptor.mcpServerEntryPath}`);
+  for (const [key, value] of Object.entries(runtimeEnv)) {
+    args.push('-e', `${key}=${value}`);
+  }
+  if (descriptor.provider === 'codex') {
+    args.push('-e', `CODEX_HOME=${descriptor.sessionHomePath}`);
+    if (
+      process.env.HAPPYCLAW_CODEX_BIN_HOST_PATH ||
+      process.env.HAPPYCLAW_CODEX_BIN
+    ) {
+      args.push(
+        '-e',
+        `HAPPYCLAW_CODEX_BIN=${
+          process.env.HAPPYCLAW_CODEX_BIN ||
+          process.env.HAPPYCLAW_CODEX_BIN_CONTAINER_PATH ||
+          DEFAULT_CODEX_BIN_CONTAINER_PATH
+        }`,
+      );
+    }
+    if (process.env.HAPPYCLAW_CODEX_BIN_SCRIPT_HOST_PATH) {
+      args.push(
+        '-e',
+        `HAPPYCLAW_CODEX_BIN_SCRIPT_PATH=${
+          process.env.HAPPYCLAW_CODEX_BIN_SCRIPT_CONTAINER_PATH ||
+          DEFAULT_CODEX_BIN_SCRIPT_CONTAINER_PATH
+        }`,
+      );
+    }
+  } else {
+    args.push('-e', `CLAUDE_CONFIG_DIR=${descriptor.sessionHomePath}`);
+  }
 
   // Docker: -v with :ro suffix for readonly
   for (const mount of mounts) {
@@ -449,7 +728,7 @@ function buildContainerArgs(
     }
   }
 
-  args.push(CONTAINER_IMAGE);
+  args.push(descriptor.imageName);
 
   return args;
 }
@@ -462,14 +741,21 @@ export async function runContainerAgent(
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  const descriptor = getContainerRunnerDescriptor(group.modelProvider);
 
   const groupDir = path.join(GROUPS_DIR, group.folder);
   mkdirForContainer(groupDir);
 
   // ─── Provider Pool selection ───
-  const poolResult = trySelectPoolProvider(group.folder);
+  const poolResult = descriptor.provider === 'claude'
+    ? trySelectPoolProvider(group.folder)
+    : null;
   const selectedProfileId = poolResult?.profileId ?? null;
   const resolvedProvider = poolResult?.resolved;
+  const providerAwareOnOutput = withProviderAnnotatedOutput(
+    descriptor.provider,
+    onOutput,
+  );
 
   try {
     // Determine if this is an admin home container (full privileges)
@@ -478,6 +764,7 @@ export async function runContainerAgent(
     const shouldMountUserSkills = !!group.created_by;
     const mounts = buildVolumeMounts(
       group,
+      descriptor,
       isAdminHome,
       shouldMountUserSkills,
       input.agentId,
@@ -489,12 +776,28 @@ export async function runContainerAgent(
     const agentSuffix = input.agentId
       ? `-${input.agentId.replace(/[^a-zA-Z0-9-]/g, '-')}`
       : '';
-    const containerName = `happyclaw-${safeName}${agentSuffix}-${Date.now()}`;
-    const containerArgs = buildContainerArgs(mounts, containerName);
+    const containerName =
+      `happyclaw-${descriptor.provider}-${safeName}${agentSuffix}-${Date.now()}`;
+    const runtimeEnv = {
+      HAPPYCLAW_CHAT_JID: input.chatJid,
+      HAPPYCLAW_GROUP_FOLDER: group.folder,
+      HAPPYCLAW_IS_HOME: String(!!group.is_home),
+      HAPPYCLAW_IS_ADMIN_HOME: String(isAdminHome),
+      HAPPYCLAW_IS_SCHEDULED_TASK: String(!!input.isScheduledTask),
+      ...(descriptor.provider === 'codex' ? getCodexRuntimeEnvVars() : {}),
+    };
+    const containerArgs = buildContainerArgs(
+      mounts,
+      containerName,
+      descriptor,
+      runtimeEnv,
+    );
 
     logger.debug(
       {
         group: group.name,
+        provider: descriptor.provider,
+        image: descriptor.imageName,
         containerName,
         mounts: mounts.map(
           (m) =>
@@ -508,6 +811,8 @@ export async function runContainerAgent(
     logger.info(
       {
         group: group.name,
+        provider: descriptor.provider,
+        image: descriptor.imageName,
         containerName,
         mountCount: mounts.length,
         isMain: input.isMain,
@@ -576,7 +881,7 @@ export async function runContainerAgent(
       attachStdoutHandler(container.stdout, stdoutState, {
         groupName: group.name,
         label: 'Container',
-        onOutput,
+        onOutput: providerAwareOnOutput,
         resetTimeout,
       });
       attachStderrHandler(container.stderr, stderrState, group.name, {
@@ -596,7 +901,7 @@ export async function runContainerAgent(
           input,
           stdoutState,
           stderrState,
-          onOutput,
+          onOutput: providerAwareOnOutput,
           resolvePromise: resolve,
           startTime,
           timeoutMs,
@@ -771,13 +1076,20 @@ export async function runHostAgent(
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
-  const setupInstallHint = 'npm --prefix container/agent-runner install';
-  const setupBuildHint = 'npm --prefix container/agent-runner run build';
+  const descriptor = getHostRunnerDescriptor(group.modelProvider);
+  const isCodexProvider = descriptor.provider === 'codex';
+  const providerAwareOnOutput = withProviderAnnotatedOutput(
+    descriptor.provider,
+    onOutput,
+  );
+  const setupInstallHint = descriptor.setupInstallHint;
+  const setupBuildHint = descriptor.setupBuildHint;
   const hostModeSetupError = (message: string): ContainerOutput => ({
     status: 'error',
     result: `宿主机模式启动失败：${message}`,
     error: message,
   });
+  const isAdminHome = !!group.is_home && group.folder === 'main';
 
   // 1. 确定工作目录
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
@@ -896,65 +1208,73 @@ export async function runHostAgent(
         group.folder,
         'agents',
         input.agentId,
-        '.claude',
+        descriptor.sessionDirName,
       )
-    : path.join(DATA_DIR, 'sessions', group.folder, '.claude');
+    : path.join(DATA_DIR, 'sessions', group.folder, descriptor.sessionDirName);
   fs.mkdirSync(groupSessionsDir, { recursive: true });
 
-  // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
-  // Load user's global MCP servers (same logic as Docker mode).
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const hostMcpServers = group.created_by ? loadUserMcpServers(group.created_by) : {};
-  ensureSettingsJson(settingsFile, hostMcpServers);
-
-  // 4. Skills 自动链接到 session 目录
-  // 链接顺序：项目级 → 用户级(覆盖同名项目级)
-  // 用户的所有 skills 在所有工作区中生效
-  try {
-    const skillsDir = path.join(groupSessionsDir, 'skills');
-    fs.mkdirSync(skillsDir, { recursive: true });
-    // 清空已有符号链接
-    for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
-      const entryPath = path.join(skillsDir, entry.name);
-      try {
-        if (entry.isSymbolicLink() || entry.isDirectory()) {
-          fs.rmSync(entryPath, { recursive: true, force: true });
-        }
-      } catch {
-        /* ignore */
-      }
+  // 3. 写入 provider 对应的会话目录初始化
+  if (isCodexProvider) {
+    try {
+      ensureCodexHomeBootstrap(groupSessionsDir);
+    } catch (err) {
+      logger.warn(
+        { folder: group.folder, err },
+        '宿主机模式 Codex home 初始化失败',
+      );
     }
+  } else {
+    const settingsFile = path.join(groupSessionsDir, 'settings.json');
+    const hostMcpServers = group.created_by
+      ? loadUserMcpServers(group.created_by)
+      : {};
+    ensureSettingsJson(settingsFile, hostMcpServers);
 
-    const linkSkillEntries = (sourceDir: string) => {
-      if (!fs.existsSync(sourceDir)) return;
-      for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
-        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-        const linkPath = path.join(skillsDir, entry.name);
+    // 4. Skills 自动链接到 session 目录
+    // 链接顺序：项目级 → 用户级(覆盖同名项目级)
+    // 用户的所有 skills 在所有工作区中生效
+    try {
+      const skillsDir = path.join(groupSessionsDir, 'skills');
+      fs.mkdirSync(skillsDir, { recursive: true });
+      for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+        const entryPath = path.join(skillsDir, entry.name);
         try {
-          // 移除已有符号链接（高优先级覆盖低优先级）
-          if (fs.existsSync(linkPath)) {
-            fs.rmSync(linkPath, { recursive: true, force: true });
+          if (entry.isSymbolicLink() || entry.isDirectory()) {
+            fs.rmSync(entryPath, { recursive: true, force: true });
           }
-          fs.symlinkSync(path.join(sourceDir, entry.name), linkPath);
         } catch {
           /* ignore */
         }
       }
-    };
 
-    // 项目级 skills
-    const projectRoot = process.cwd();
-    linkSkillEntries(path.join(projectRoot, 'container', 'skills'));
-    // 用户级 skills（覆盖同名项目级）
-    const ownerId = group.created_by;
-    if (ownerId) {
-      linkSkillEntries(path.join(DATA_DIR, 'skills', ownerId));
+      const linkSkillEntries = (sourceDir: string) => {
+        if (!fs.existsSync(sourceDir)) return;
+        for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+          if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+          const linkPath = path.join(skillsDir, entry.name);
+          try {
+            if (fs.existsSync(linkPath)) {
+              fs.rmSync(linkPath, { recursive: true, force: true });
+            }
+            fs.symlinkSync(path.join(sourceDir, entry.name), linkPath);
+          } catch {
+            /* ignore */
+          }
+        }
+      };
+
+      const projectRoot = process.cwd();
+      linkSkillEntries(path.join(projectRoot, 'container', 'skills'));
+      const ownerId = group.created_by;
+      if (ownerId) {
+        linkSkillEntries(path.join(DATA_DIR, 'skills', ownerId));
+      }
+    } catch (err) {
+      logger.warn(
+        { folder: group.folder, err },
+        '宿主机模式 skills 符号链接失败',
+      );
     }
-  } catch (err) {
-    logger.warn(
-      { folder: group.folder, err },
-      '宿主机模式 skills 符号链接失败',
-    );
   }
 
   // 5. 构建环境变量
@@ -962,36 +1282,41 @@ export async function runHostAgent(
     ...(process.env as Record<string, string>),
   };
 
-  // ─── Provider Pool selection (host mode) ───
-  const containerOverride = getContainerEnvConfig(group.folder);
-  const hostPoolResult = trySelectPoolProvider(group.folder);
+  const containerOverride = isCodexProvider
+    ? null
+    : getContainerEnvConfig(group.folder);
+  const hostPoolResult = isCodexProvider
+    ? null
+    : trySelectPoolProvider(group.folder);
   const hostSelectedProfileId = hostPoolResult?.profileId ?? null;
   const globalConfig = hostPoolResult?.resolved.config ?? getClaudeProviderConfig();
 
   try {
-    // 配置层环境变量
-    const envLines = buildContainerEnvLines(
-      globalConfig,
-      containerOverride,
-      hostPoolResult?.resolved.customEnv,
-    );
-    for (const line of envLines) {
-      const eqIdx = line.indexOf('=');
-      if (eqIdx > 0) {
-        hostEnv[line.slice(0, eqIdx)] = line.slice(eqIdx + 1);
+    if (!isCodexProvider && containerOverride) {
+      const envLines = buildContainerEnvLines(
+        globalConfig,
+        containerOverride,
+        hostPoolResult?.resolved.customEnv,
+      );
+      for (const line of envLines) {
+        const eqIdx = line.indexOf('=');
+        if (eqIdx > 0) {
+          hostEnv[line.slice(0, eqIdx)] = line.slice(eqIdx + 1);
+        }
       }
     }
 
-    // Write .credentials.json for OAuth credentials
-    const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
-    if (mergedConfig.claudeOAuthCredentials) {
-      try {
-        writeCredentialsFile(groupSessionsDir, mergedConfig);
-      } catch (err) {
-        logger.warn(
-          { folder: group.folder, err },
-          'Failed to write .credentials.json for host agent',
-        );
+    if (!isCodexProvider && containerOverride) {
+      const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
+      if (mergedConfig.claudeOAuthCredentials) {
+        try {
+          writeCredentialsFile(groupSessionsDir, mergedConfig);
+        } catch (err) {
+          logger.warn(
+            { folder: group.folder, err },
+            'Failed to write .credentials.json for host agent',
+          );
+        }
       }
     }
 
@@ -1017,75 +1342,92 @@ export async function runHostAgent(
       memoryFolder,
     );
     hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
-    hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
-    // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
-    hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
-    // CLI 禁止 root 用户使用 --dangerously-skip-permissions，
-    // 通过 IS_SANDBOX 标记告知 CLI 当前运行在受控环境中以绕过此限制
-    if (typeof process.getuid === 'function' && process.getuid() === 0) {
-      hostEnv['IS_SANDBOX'] = '1';
+    hostEnv['HAPPYCLAW_MODEL_PROVIDER'] = descriptor.provider;
+    hostEnv['HAPPYCLAW_CHAT_JID'] = input.chatJid;
+    hostEnv['HAPPYCLAW_GROUP_FOLDER'] = group.folder;
+    hostEnv['HAPPYCLAW_IS_HOME'] = String(!!group.is_home);
+    hostEnv['HAPPYCLAW_IS_ADMIN_HOME'] = String(isAdminHome);
+    hostEnv['HAPPYCLAW_IS_SCHEDULED_TASK'] = String(
+      !!input.isScheduledTask,
+    );
+    hostEnv['HAPPYCLAW_SHARED_MCP_TOOLS_MODULE'] =
+      descriptor.sharedToolsModulePath;
+    hostEnv['HAPPYCLAW_MCP_SERVER_ENTRY'] = descriptor.mcpServerEntryPath;
+    if (isCodexProvider) {
+      hostEnv['CODEX_HOME'] = groupSessionsDir;
+      Object.assign(hostEnv, getCodexRuntimeEnvVars());
+    } else {
+      hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
+      hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
+      if (typeof process.getuid === 'function' && process.getuid() === 0) {
+        hostEnv['IS_SANDBOX'] = '1';
+      }
     }
 
     // 6. 编译检查
-    const projectRoot = process.cwd();
-    const agentRunnerRoot = path.join(projectRoot, 'container', 'agent-runner');
-    const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
-    const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
-    const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
-    const missingDeps = requiredDeps.filter((dep) => {
-      const depJson = path.join(
-        agentRunnerNodeModules,
-        ...dep.split('/'),
-        'package.json',
-      );
-      return !fs.existsSync(depJson);
-    });
-    if (missingDeps.length > 0) {
-      const missing = missingDeps.join(', ');
-      logger.error(
-        { group: group.name, missingDeps },
-        'Host agent preflight failed: dependencies missing',
-      );
-      return hostModeSetupError(
-        `缺少 agent-runner 依赖（${missing}）。请先执行：${setupInstallHint}`,
-      );
+    const runnerNodeModules = path.join(descriptor.runnerRoot, 'node_modules');
+    if (!isCodexProvider && !descriptor.customEntry) {
+      const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
+      const missingDeps = requiredDeps.filter((dep) => {
+        const depJson = path.join(
+          runnerNodeModules,
+          ...dep.split('/'),
+          'package.json',
+        );
+        return !fs.existsSync(depJson);
+      });
+      if (missingDeps.length > 0) {
+        const missing = missingDeps.join(', ');
+        logger.error(
+          { group: group.name, missingDeps },
+          'Host agent preflight failed: dependencies missing',
+        );
+        return hostModeSetupError(
+          `缺少 agent-runner 依赖（${missing}）。请先执行：${setupInstallHint}`,
+        );
+      }
     }
-    if (!fs.existsSync(agentRunnerDist)) {
+    if (!fs.existsSync(descriptor.distEntry)) {
       logger.error(
-        { group: group.name, agentRunnerDist },
+        { group: group.name, distEntry: descriptor.distEntry, provider: descriptor.provider },
         'Host agent preflight failed: dist not found',
       );
       return hostModeSetupError(
-        `agent-runner 未编译。请先执行：${setupBuildHint}`,
+        `${descriptor.provider === 'codex' ? 'codex-runner' : 'agent-runner'} 未编译。请先执行：${setupBuildHint}`,
       );
     }
 
     // Auto-rebuild if dist is stale (src newer than dist)
     try {
-      const distMtime = fs.statSync(agentRunnerDist).mtimeMs;
-      const srcDir = path.join(agentRunnerRoot, 'src');
-      const srcFiles = fs.readdirSync(srcDir);
-      const newestSrc = Math.max(
-        ...srcFiles.map((f) => fs.statSync(path.join(srcDir, f)).mtimeMs),
-      );
-      if (newestSrc > distMtime) {
-        logger.info(
-          { group: group.name },
-          'agent-runner dist 已过期，自动重新编译...',
+      const distMtime = fs.statSync(descriptor.distEntry).mtimeMs;
+      const srcDir = path.join(descriptor.runnerRoot, 'src');
+      if (!descriptor.customEntry && fs.existsSync(srcDir)) {
+        const srcFiles = fs.readdirSync(srcDir);
+        const newestSrc = Math.max(
+          ...srcFiles.map((f) => fs.statSync(path.join(srcDir, f)).mtimeMs),
         );
-        try {
-          const { execSync } = await import('child_process');
-          execSync('npm run build', {
-            cwd: agentRunnerRoot,
-            stdio: 'pipe',
-            timeout: 30_000,
-          });
-          logger.info({ group: group.name }, 'agent-runner 自动编译完成');
-        } catch (buildErr) {
-          logger.warn(
-            { group: group.name, err: buildErr },
-            `agent-runner 自动编译失败，使用旧版 dist。手动执行：${setupBuildHint}`,
+        if (newestSrc > distMtime) {
+          logger.info(
+            { group: group.name, provider: descriptor.provider },
+            `${descriptor.provider === 'codex' ? 'codex-runner' : 'agent-runner'} dist 已过期，自动重新编译...`,
           );
+          try {
+            const { execSync } = await import('child_process');
+            execSync('npm run build', {
+              cwd: descriptor.runnerRoot,
+              stdio: 'pipe',
+              timeout: 30_000,
+            });
+            logger.info(
+              { group: group.name, provider: descriptor.provider },
+              `${descriptor.provider === 'codex' ? 'codex-runner' : 'agent-runner'} 自动编译完成`,
+            );
+          } catch (buildErr) {
+            logger.warn(
+              { group: group.name, err: buildErr, provider: descriptor.provider },
+              `${descriptor.provider === 'codex' ? 'codex-runner' : 'agent-runner'} 自动编译失败，使用旧版 dist。手动执行：${setupBuildHint}`,
+            );
+          }
         }
       }
     } catch {
@@ -1097,8 +1439,9 @@ export async function runHostAgent(
         group: group.name,
         workingDir: groupDir,
         isMain: input.isMain,
+        provider: descriptor.provider,
       },
-      'Spawning host agent',
+      'Spawning host runner',
     );
 
     const logsDir = path.join(groupDir, 'logs');
@@ -1112,7 +1455,7 @@ export async function runHostAgent(
       };
 
       // 7. 启动进程
-      const proc = spawn('node', [agentRunnerDist], {
+      const proc = spawn('node', [descriptor.distEntry], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: hostEnv,
         cwd: groupDir,
@@ -1168,7 +1511,7 @@ export async function runHostAgent(
       attachStdoutHandler(proc.stdout, stdoutState, {
         groupName: group.name,
         label: 'Host agent',
-        onOutput,
+        onOutput: providerAwareOnOutput,
         resetTimeout,
       });
       attachStderrHandler(proc.stderr, stderrState, group.name, {
@@ -1190,7 +1533,7 @@ export async function runHostAgent(
           input,
           stdoutState,
           stderrState,
-          onOutput,
+          onOutput: providerAwareOnOutput,
           resolvePromise: resolveOnce,
           startTime,
           timeoutMs,

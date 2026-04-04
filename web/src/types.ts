@@ -13,6 +13,7 @@ export interface GroupInfo {
   lastMessage?: string;
   lastMessageTime?: string;
   execution_mode?: 'container' | 'host';
+  model_provider?: 'claude' | 'codex';
   custom_cwd?: string;
   created_by?: string;
   pinned_at?: string;

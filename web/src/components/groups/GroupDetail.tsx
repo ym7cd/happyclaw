@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
-import { BookOpen } from 'lucide-react';
+import { BookOpen, Bot, Box, Code2, Monitor } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { GroupInfo } from '../../stores/groups';
 
 interface GroupDetailProps {
@@ -21,6 +22,25 @@ export function GroupDetail({ group }: GroupDetailProps) {
 
   return (
     <div className="p-4 bg-background space-y-3">
+      <div className="flex flex-wrap gap-2">
+        <Badge variant="outline" className="gap-1 text-[10px] uppercase tracking-wide">
+          {group.model_provider === 'codex' ? (
+            <Code2 className="w-3 h-3" />
+          ) : (
+            <Bot className="w-3 h-3" />
+          )}
+          {group.model_provider || 'claude'}
+        </Badge>
+        <Badge variant="secondary" className="gap-1 text-[10px] uppercase tracking-wide">
+          {(group.execution_mode || 'container') === 'host' ? (
+            <Monitor className="w-3 h-3" />
+          ) : (
+            <Box className="w-3 h-3" />
+          )}
+          {group.execution_mode || 'container'}
+        </Badge>
+      </div>
+
       {/* JID */}
       <div>
         <div className="text-xs text-muted-foreground mb-1">完整 JID</div>

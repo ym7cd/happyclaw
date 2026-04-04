@@ -7,7 +7,12 @@ import {
   GroupMemberAddSchema,
   ContainerEnvSchema,
 } from '../schemas.js';
-import type { AuthUser, RegisteredGroup, ExecutionMode } from '../types.js';
+import type {
+  AuthUser,
+  RegisteredGroup,
+  ExecutionMode,
+  ModelProvider,
+} from '../types.js';
 import { checkGroupLimit } from '../billing.js';
 import { DATA_DIR, GROUPS_DIR, isDockerAvailable } from '../config.js';
 import {
@@ -146,6 +151,7 @@ interface GroupPayloadItem {
   lastMessage?: string;
   lastMessageTime?: string;
   execution_mode: 'container' | 'host';
+  model_provider: 'claude' | 'codex';
   custom_cwd?: string;
   is_home?: boolean;
   is_my_home?: boolean;
@@ -254,6 +260,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
         chats.get(jid)?.last_message_time ||
         group.added_at,
       execution_mode: group.executionMode || 'container',
+      model_provider: group.modelProvider || 'claude',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       is_home: isHome || undefined,
       is_my_home: (isHome && group.created_by === user.id) || undefined,
@@ -358,6 +365,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
 
   // If user didn't specify execution mode, pick based on Docker availability
   const executionMode = validation.data.execution_mode || (await isDockerAvailable() ? 'container' : 'host');
+  const modelProvider = validation.data.model_provider || 'claude';
   const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
@@ -575,6 +583,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     folder,
     added_at: now,
     executionMode: executionMode as ExecutionMode,
+    modelProvider: modelProvider as ModelProvider,
     customCwd: executionMode === 'host' ? customCwd : undefined,
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
@@ -642,6 +651,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       folder: group.folder,
       added_at: group.added_at,
       execution_mode: group.executionMode || 'container',
+      model_provider: group.modelProvider || 'claude',
       custom_cwd: hasHostExecutionPermission(authUser)
         ? group.customCwd
         : undefined,
@@ -679,6 +689,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned,
     activation_mode,
     execution_mode,
+    model_provider,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -687,7 +698,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     !name &&
     is_pinned === undefined &&
     activation_mode === undefined &&
-    execution_mode === undefined
+    execution_mode === undefined &&
+    model_provider === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -713,7 +725,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned !== undefined &&
     !name &&
     activation_mode === undefined &&
-    execution_mode === undefined;
+    execution_mode === undefined &&
+    model_provider === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -755,8 +768,13 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     unpinGroup(authUser.id, jid);
   }
 
-  // Update registered group if name, activation_mode, or execution_mode changed
-  if (name || activation_mode !== undefined || execution_mode !== undefined) {
+  // Update registered group if any persisted group field changed
+  if (
+    name ||
+    activation_mode !== undefined ||
+    execution_mode !== undefined ||
+    model_provider !== undefined
+  ) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -766,6 +784,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         execution_mode !== undefined
           ? (execution_mode as ExecutionMode)
           : existing.executionMode,
+      modelProvider:
+        model_provider !== undefined
+          ? (model_provider as ModelProvider)
+          : existing.modelProvider,
       customCwd: existing.customCwd,
       initSourcePath: existing.initSourcePath,
       initGitUrl: existing.initGitUrl,

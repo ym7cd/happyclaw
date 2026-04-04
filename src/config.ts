@@ -22,8 +22,11 @@ export const STORE_DIR = path.join(DATA_DIR, 'db');
 export const GROUPS_DIR = path.join(DATA_DIR, 'groups');
 export const MAIN_GROUP_FOLDER = 'main';
 
-export const CONTAINER_IMAGE =
+export const CLAUDE_CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'happyclaw-agent:latest';
+export const CODEX_CONTAINER_IMAGE =
+  process.env.CONTAINER_IMAGE_CODEX || 'happyclaw-codex:latest';
+export const CONTAINER_IMAGE = CLAUDE_CONTAINER_IMAGE;
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses TZ env var with Asia/Shanghai fallback
 export const TIMEZONE =

@@ -43,6 +43,7 @@ import {
   UserSessionWithUser,
   Permission,
   PermissionTemplateKey,
+  ModelProvider,
 } from './types.js';
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
@@ -622,6 +623,11 @@ export function initDatabase(): void {
     'execution_mode',
     "TEXT DEFAULT 'container'",
   );
+  ensureColumn(
+    'registered_groups',
+    'model_provider',
+    "TEXT DEFAULT 'claude'",
+  );
   ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
@@ -694,13 +700,14 @@ export function initDatabase(): void {
           added_at TEXT NOT NULL,
           container_config TEXT,
           execution_mode TEXT DEFAULT 'container',
+          model_provider TEXT DEFAULT 'claude',
           custom_cwd TEXT,
           init_source_path TEXT,
           init_git_url TEXT,
           created_by TEXT,
           is_home INTEGER DEFAULT 0
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
+        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, 'claude', custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -745,6 +752,7 @@ export function initDatabase(): void {
       'added_at',
       'container_config',
       'execution_mode',
+      'model_provider',
       'custom_cwd',
       'init_source_path',
       'init_git_url',
@@ -2189,6 +2197,19 @@ function parseExecutionMode(
   return 'container';
 }
 
+function parseModelProvider(
+  raw: string | null,
+  context: string,
+): ModelProvider {
+  if (raw === 'claude' || raw === 'codex') return raw;
+  if (raw !== null && raw !== '') {
+    console.warn(
+      `Invalid model_provider "${raw}" for ${context}, falling back to "claude"`,
+    );
+  }
+  return 'claude';
+}
+
 /** Raw row shape from registered_groups table — single source of truth for column mapping. */
 type RegisteredGroupRow = {
   jid: string;
@@ -2197,6 +2218,7 @@ type RegisteredGroupRow = {
   added_at: string;
   container_config: string | null;
   execution_mode: string | null;
+  model_provider: string | null;
   custom_cwd: string | null;
   init_source_path: string | null;
   init_git_url: string | null;
@@ -2225,6 +2247,10 @@ function parseGroupRow(
       ? JSON.parse(row.container_config)
       : undefined,
     executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
+    modelProvider: parseModelProvider(
+      row.model_provider,
+      `group ${row.jid}`,
+    ),
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
@@ -2265,8 +2291,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, model_provider, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2274,6 +2300,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.executionMode ?? 'container',
+    group.modelProvider ?? 'claude',
     group.customCwd ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
@@ -2730,6 +2757,7 @@ export function getGroupsByOwner(
     added_at: string;
     container_config: string | null;
     execution_mode: string | null;
+    model_provider: string | null;
     custom_cwd: string | null;
     init_source_path: string | null;
     init_git_url: string | null;
@@ -2747,6 +2775,10 @@ export function getGroupsByOwner(
       ? JSON.parse(row.container_config)
       : undefined,
     executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
+    modelProvider: parseModelProvider(
+      row.model_provider,
+      `group ${row.jid}`,
+    ),
     customCwd: row.custom_cwd ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,

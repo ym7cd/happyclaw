@@ -132,6 +132,7 @@ RUN mkdir -p /opt/builtin-skills; \
 
 # Copy source code
 COPY agent-runner/ ./
+COPY shared/ ./shared/
 
 # Build TypeScript
 RUN npm run build

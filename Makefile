@@ -1,7 +1,7 @@
 .PHONY: dev dev-backend dev-web build build-backend build-web start \
-       typecheck typecheck-backend typecheck-web typecheck-agent-runner \
+       typecheck typecheck-backend typecheck-web typecheck-agent-runner typecheck-codex-runner \
        format format-check install clean reset-init update-sdk ensure-latest-sdk sync-types \
-       backup restore help _ensure-docker-image
+       backup restore help _ensure-docker-image _ensure-codex-docker-image build-codex-image
 
 # ─── Runtime Detection ──────────────────────────────────────
 # 优先使用 bun（跳过编译、启动更快），fallback 到 npm + tsx + node
@@ -22,7 +22,7 @@ endif
 # ─── Development ─────────────────────────────────────────────
 
 dev: ## 启动前后端（首次自动安装依赖和构建容器镜像）
-	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ container/codex-runner/package.json -nt container/codex-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
 	@$(PKG) --prefix container/agent-runner run build --silent 2>/dev/null || $(PKG) --prefix container/agent-runner run build
 	@echo "🚀 使用 $(PKG) 启动..."
@@ -49,7 +49,7 @@ build-web: ## 仅编译前端
 # ─── Production ──────────────────────────────────────────────
 
 start: ensure-latest-sdk ## 一键启动生产环境
-	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ container/codex-runner/package.json -nt container/codex-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
 	@$(MAKE) _ensure-docker-image
 ifeq ($(HAS_BUN),1)
 	@NEED_SYNC=0; \
@@ -115,7 +115,7 @@ endif
 
 # ─── Quality ─────────────────────────────────────────────────
 
-typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner ## 全量类型检查
+typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner typecheck-codex-runner ## 全量类型检查
 	@./scripts/check-stream-event-sync.sh
 
 typecheck-backend:
@@ -126,6 +126,9 @@ typecheck-web:
 
 typecheck-agent-runner:
 	cd container/agent-runner && $(RUN) tsc --noEmit
+
+typecheck-codex-runner:
+	cd container/codex-runner && $(RUN) tsc --noEmit
 
 test: ## 运行单元测试
 	bun test
@@ -139,7 +142,9 @@ format-check: ## 检查代码格式
 # ─── Docker Image ─────────────────────────────────────────────
 
 # Docker 镜像源文件：Dockerfile、entrypoint.sh、agent-runner 源码
-DOCKER_SRC := container/Dockerfile container/entrypoint.sh $(wildcard container/agent-runner/src/*.ts) $(wildcard container/agent-runner/prompts/*)
+DOCKER_SHARED_SRC := $(wildcard container/shared/*)
+DOCKER_SRC := container/Dockerfile container/entrypoint.sh $(wildcard container/agent-runner/src/*.ts) $(wildcard container/agent-runner/prompts/*) $(DOCKER_SHARED_SRC)
+DOCKER_CODEX_SRC := container/Dockerfile.codex container/entrypoint.sh container/build-codex.sh $(wildcard container/codex-runner/src/*.ts) $(DOCKER_SHARED_SRC)
 
 _ensure-docker-image: ## (内部) 检测 Docker 镜像是否需要构建/重建
 	@if command -v docker >/dev/null 2>&1; then \
@@ -162,6 +167,31 @@ _ensure-docker-image: ## (内部) 检测 Docker 镜像是否需要构建/重建
 	    fi; \
 	  fi; \
 	fi
+
+_ensure-codex-docker-image: ## (内部) 检测 Codex Docker 镜像是否需要构建/重建
+	@if command -v docker >/dev/null 2>&1; then \
+	  if ! docker image inspect happyclaw-codex:latest >/dev/null 2>&1; then \
+	    echo "🐳 Codex Docker 镜像不存在，正在构建..."; \
+	    ./container/build-codex.sh; \
+	  elif [ ! -f .docker-build-codex-sentinel ]; then \
+	    echo "🐳 Codex Docker 镜像 sentinel 缺失，正在重建..."; \
+	    ./container/build-codex.sh; \
+	  else \
+	    STALE=0; \
+	    for f in $(DOCKER_CODEX_SRC); do \
+	      if [ "$$f" -nt .docker-build-codex-sentinel ]; then STALE=1; break; fi; \
+	    done; \
+	    if [ "$$STALE" = "1" ]; then \
+	      echo "🐳 检测到 Codex 容器源码变更，正在重建 Docker 镜像..."; \
+	      ./container/build-codex.sh; \
+	    else \
+	      echo "✅ Codex Docker 镜像无需重建"; \
+	    fi; \
+	  fi; \
+	fi
+
+build-codex-image: ## 构建 happyclaw-codex 镜像
+	./container/build-codex.sh
 
 # ─── Shared Types ────────────────────────────────────────────
 
@@ -193,13 +223,16 @@ install: ## 安装全部依赖并编译 agent-runner
 	@chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true
 	cd container/agent-runner && $(PKG) install
 	cd container/agent-runner && $(PKG) run build
+	cd container/codex-runner && $(PKG) install
+	cd container/codex-runner && $(PKG) run build
 	cd web && $(PKG) install
-	@touch node_modules web/node_modules container/agent-runner/node_modules
+	@touch node_modules web/node_modules container/agent-runner/node_modules container/codex-runner/node_modules
 
 clean: ## 清理构建产物
 	rm -rf dist
 	rm -rf web/dist
 	rm -rf container/agent-runner/dist
+	rm -rf container/codex-runner/dist
 	rm -f .build-sentinel
 
 reset-init: ## 完全重置为首装状态（清空所有运行时数据）

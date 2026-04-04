@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
@@ -26,11 +27,14 @@ const CLAUDE_CUSTOM_ENV_FILE = path.join(
   'claude-custom-env.json',
 );
 const FEISHU_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'feishu-provider.json');
+const CODEX_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'codex-provider.json');
+const MANAGED_CODEX_HOME_DIR = path.join(CLAUDE_CONFIG_DIR, 'codex-home');
 const TELEGRAM_CONFIG_FILE = path.join(
   CLAUDE_CONFIG_DIR,
   'telegram-provider.json',
 );
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_CODEX_TEXT_LENGTH = 100_000;
 const RESERVED_CLAUDE_ENV_KEYS = new Set([
   'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
@@ -156,6 +160,25 @@ export interface FeishuProviderConfig {
   updatedAt: string | null;
 }
 
+export interface CodexProviderConfig {
+  authJson: string;
+  configToml: string;
+  openaiApiKey: string;
+  updatedAt: string | null;
+}
+
+export type CodexConfigSource = 'runtime' | 'env' | 'home' | 'none';
+
+export interface CodexProviderPublicConfig {
+  hasAuthJson: boolean;
+  hasConfigToml: boolean;
+  hasOpenaiApiKey: boolean;
+  openaiApiKeyMasked: string | null;
+  updatedAt: string | null;
+  source: CodexConfigSource;
+  homePath: string;
+}
+
 export type FeishuConfigSource = 'runtime' | 'env' | 'none';
 
 export interface FeishuProviderPublicConfig {
@@ -202,6 +225,11 @@ interface FeishuSecretPayload {
   appSecret: string;
 }
 
+interface CodexSecretPayload {
+  authJson: string;
+  openaiApiKey: string;
+}
+
 interface TelegramSecretPayload {
   botToken: string;
 }
@@ -210,6 +238,13 @@ interface StoredFeishuProviderConfigV1 {
   version: 1;
   appId: string;
   enabled?: boolean;
+  updatedAt: string;
+  secret: EncryptedSecrets;
+}
+
+interface StoredCodexProviderConfigV1 {
+  version: 1;
+  configToml: string;
   updatedAt: string;
   secret: EncryptedSecrets;
 }
@@ -416,6 +451,39 @@ function normalizeFeishuAppId(input: unknown): string {
     throw new Error('Field too long: appId');
   }
   return value;
+}
+
+function normalizeCodexText(input: unknown, fieldName: string): string {
+  if (input === undefined || input === null) return '';
+  if (typeof input !== 'string') {
+    throw new Error(`Invalid field: ${fieldName}`);
+  }
+  const value = input.trim();
+  if (!value) return '';
+  if (value.length > MAX_CODEX_TEXT_LENGTH) {
+    throw new Error(`Field too long: ${fieldName}`);
+  }
+  return value;
+}
+
+function normalizeCodexAuthJson(input: unknown): string {
+  const value = normalizeCodexText(input, 'authJson');
+  if (!value) return '';
+  try {
+    JSON.parse(value);
+  } catch {
+    throw new Error('Invalid field: authJson');
+  }
+  return value;
+}
+
+function normalizeCodexConfigToml(input: unknown): string {
+  return normalizeCodexText(input, 'configToml');
+}
+
+function normalizeCodexOpenAiApiKey(input: unknown): string {
+  if (input === undefined || input === null || input === '') return '';
+  return normalizeSecret(input, 'openaiApiKey');
 }
 
 function normalizeTelegramProxyUrl(input: unknown): string {
@@ -1607,6 +1675,231 @@ function defaultsFeishuFromEnv(): FeishuProviderConfig {
     appId: raw.appId.trim(),
     appSecret: raw.appSecret.trim(),
     updatedAt: null,
+  };
+}
+
+function readCodexFilesFromHome(homeDir: string): Pick<
+  CodexProviderConfig,
+  'authJson' | 'configToml'
+> {
+  const authJsonPath = path.join(homeDir, 'auth.json');
+  const configTomlPath = path.join(homeDir, 'config.toml');
+  return {
+    authJson: fs.existsSync(authJsonPath)
+      ? normalizeCodexAuthJson(fs.readFileSync(authJsonPath, 'utf-8'))
+      : '',
+    configToml: fs.existsSync(configTomlPath)
+      ? normalizeCodexConfigToml(fs.readFileSync(configTomlPath, 'utf-8'))
+      : '',
+  };
+}
+
+function readStoredCodexConfig(): CodexProviderConfig | null {
+  if (!fs.existsSync(CODEX_CONFIG_FILE)) return null;
+  const content = fs.readFileSync(CODEX_CONFIG_FILE, 'utf-8');
+  const parsed = JSON.parse(content) as Record<string, unknown>;
+  if (parsed.version !== 1) return null;
+
+  const stored = parsed as unknown as StoredCodexProviderConfigV1;
+  const secret = decryptChannelSecret<CodexSecretPayload>(stored.secret);
+  return {
+    authJson: normalizeCodexAuthJson(secret.authJson),
+    configToml: normalizeCodexConfigToml(stored.configToml),
+    openaiApiKey: normalizeCodexOpenAiApiKey(secret.openaiApiKey),
+    updatedAt: stored.updatedAt || null,
+  };
+}
+
+function defaultsCodexFromEnv(): CodexProviderConfig {
+  const codeHome = process.env.CODEX_HOME
+    ? path.resolve(process.env.CODEX_HOME)
+    : '';
+  const files = codeHome ? readCodexFilesFromHome(codeHome) : {
+    authJson: '',
+    configToml: '',
+  };
+  return {
+    authJson: files.authJson,
+    configToml: files.configToml,
+    openaiApiKey: normalizeCodexOpenAiApiKey(process.env.OPENAI_API_KEY || ''),
+    updatedAt: null,
+  };
+}
+
+function defaultsCodexFromHome(): CodexProviderConfig {
+  const files = readCodexFilesFromHome(path.join(os.homedir(), '.codex'));
+  return {
+    authJson: files.authJson,
+    configToml: files.configToml,
+    openaiApiKey: '',
+    updatedAt: null,
+  };
+}
+
+function clearManagedCodexHome(): void {
+  fs.rmSync(MANAGED_CODEX_HOME_DIR, { recursive: true, force: true });
+}
+
+function materializeManagedCodexHome(config: CodexProviderConfig): void {
+  fs.mkdirSync(MANAGED_CODEX_HOME_DIR, { recursive: true });
+
+  const authJsonPath = path.join(MANAGED_CODEX_HOME_DIR, 'auth.json');
+  const configTomlPath = path.join(MANAGED_CODEX_HOME_DIR, 'config.toml');
+
+  if (config.authJson) {
+    fs.writeFileSync(authJsonPath, config.authJson + '\n', {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+  } else {
+    fs.rmSync(authJsonPath, { force: true });
+  }
+
+  if (config.configToml) {
+    fs.writeFileSync(configTomlPath, config.configToml + '\n', {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+  } else {
+    fs.rmSync(configTomlPath, { force: true });
+  }
+}
+
+export function getManagedCodexHomeDir(): string {
+  return MANAGED_CODEX_HOME_DIR;
+}
+
+export function getEffectiveCodexHomeDir(): string {
+  if (process.env.CODEX_HOME?.trim()) {
+    return path.resolve(process.env.CODEX_HOME);
+  }
+  if (fs.existsSync(CODEX_CONFIG_FILE)) {
+    return MANAGED_CODEX_HOME_DIR;
+  }
+  return path.join(os.homedir(), '.codex');
+}
+
+export function getCodexProviderConfigWithSource(): {
+  config: CodexProviderConfig;
+  source: CodexConfigSource;
+  homePath: string;
+} {
+  try {
+    const stored = readStoredCodexConfig();
+    if (stored) {
+      return {
+        config: stored,
+        source: 'runtime',
+        homePath: MANAGED_CODEX_HOME_DIR,
+      };
+    }
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to read runtime Codex config, falling back to env/home',
+    );
+  }
+
+  const fromEnv = defaultsCodexFromEnv();
+  if (
+    fromEnv.authJson ||
+    fromEnv.configToml ||
+    fromEnv.openaiApiKey ||
+    process.env.CODEX_HOME?.trim()
+  ) {
+    return {
+      config: fromEnv,
+      source: 'env',
+      homePath: process.env.CODEX_HOME
+        ? path.resolve(process.env.CODEX_HOME)
+        : path.join(os.homedir(), '.codex'),
+    };
+  }
+
+  const fromHome = defaultsCodexFromHome();
+  if (fromHome.authJson || fromHome.configToml) {
+    return {
+      config: fromHome,
+      source: 'home',
+      homePath: path.join(os.homedir(), '.codex'),
+    };
+  }
+
+  return {
+    config: fromHome,
+    source: 'none',
+    homePath: path.join(os.homedir(), '.codex'),
+  };
+}
+
+export function getCodexProviderConfig(): CodexProviderConfig {
+  return getCodexProviderConfigWithSource().config;
+}
+
+export function saveCodexProviderConfig(
+  next: Omit<CodexProviderConfig, 'updatedAt'>,
+): CodexProviderConfig {
+  const normalized: CodexProviderConfig = {
+    authJson: normalizeCodexAuthJson(next.authJson),
+    configToml: normalizeCodexConfigToml(next.configToml),
+    openaiApiKey: normalizeCodexOpenAiApiKey(next.openaiApiKey),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const isEmpty = !(
+    normalized.authJson ||
+    normalized.configToml ||
+    normalized.openaiApiKey
+  );
+  if (isEmpty) {
+    fs.rmSync(CODEX_CONFIG_FILE, { force: true });
+    clearManagedCodexHome();
+    return {
+      authJson: '',
+      configToml: '',
+      openaiApiKey: '',
+      updatedAt: null,
+    };
+  }
+
+  const payload: StoredCodexProviderConfigV1 = {
+    version: 1,
+    configToml: normalized.configToml,
+    updatedAt: normalized.updatedAt || new Date().toISOString(),
+    secret: encryptChannelSecret<CodexSecretPayload>({
+      authJson: normalized.authJson,
+      openaiApiKey: normalized.openaiApiKey,
+    }),
+  };
+
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const tmp = `${CODEX_CONFIG_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, CODEX_CONFIG_FILE);
+  materializeManagedCodexHome(normalized);
+  return normalized;
+}
+
+export function getCodexRuntimeEnvVars(): Record<string, string> {
+  const { config } = getCodexProviderConfigWithSource();
+  return config.openaiApiKey
+    ? { OPENAI_API_KEY: config.openaiApiKey }
+    : {};
+}
+
+export function toPublicCodexProviderConfig(
+  config: CodexProviderConfig,
+  source: CodexConfigSource,
+  homePath: string,
+): CodexProviderPublicConfig {
+  return {
+    hasAuthJson: !!config.authJson,
+    hasConfigToml: !!config.configToml,
+    hasOpenaiApiKey: !!config.openaiApiKey,
+    openaiApiKeyMasked: maskSecret(config.openaiApiKey),
+    updatedAt: config.updatedAt,
+    source,
+    homePath,
   };
 }
 

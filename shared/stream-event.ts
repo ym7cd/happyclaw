@@ -20,6 +20,8 @@ export type StreamEventType =
 
 export interface StreamEvent {
   eventType: StreamEventType;
+  /** The agent provider that produced this event, if known. */
+  provider?: 'claude' | 'codex';
   /** Correlates all stream events for a single user turn. */
   turnId?: string;
   /** SDK session identifier if known. */

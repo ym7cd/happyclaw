@@ -1,0 +1,22 @@
+ARG BASE_IMAGE=happyclaw-agent:latest
+FROM ${BASE_IMAGE}
+
+ARG CACHEBUST=1
+
+RUN npm install -g @openai/codex@latest && \
+    codex --version
+
+WORKDIR /app-codex
+
+COPY codex-runner/package.json codex-runner/package-lock.json ./
+RUN npm install
+
+COPY codex-runner/ ./
+COPY shared/ /app/shared/
+RUN npm run build
+
+ENV HAPPYCLAW_AGENT_HOME=/home/node/.codex
+ENV HAPPYCLAW_RUNNER_APP_DIR=/app-codex
+
+WORKDIR /workspace/group
+ENTRYPOINT ["/app/entrypoint.sh"]

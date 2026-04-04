@@ -190,7 +190,7 @@ interface ChatState {
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
   clearHistory: (jid: string) => Promise<boolean>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
-  createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
+  createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; model_provider?: 'claude' | 'codex'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
@@ -1089,10 +1089,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createFlow: async (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => {
+  createFlow: async (name: string, options?: { execution_mode?: 'container' | 'host'; model_provider?: 'claude' | 'codex'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => {
     try {
       const body: Record<string, string> = { name };
       if (options?.execution_mode) body.execution_mode = options.execution_mode;
+      if (options?.model_provider) body.model_provider = options.model_provider;
       if (options?.custom_cwd) body.custom_cwd = options.custom_cwd;
       if (options?.init_source_path) body.init_source_path = options.init_source_path;
       if (options?.init_git_url) body.init_git_url = options.init_git_url;

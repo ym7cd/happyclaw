@@ -1,0 +1,27 @@
+{
+  "name": "happyclaw-codex-runner",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Host/container-side Codex runner for HappyClaw",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/riba2534/happyclaw.git",
+    "directory": "container/codex-runner"
+  },
+  "author": "riba2534",
+  "keywords": [
+    "codex",
+    "agent-runner",
+    "happyclaw"
+  ]
+}

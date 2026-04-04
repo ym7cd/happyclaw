@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronUp, Users } from 'lucide-react';
+import { Bot, ChevronDown, ChevronUp, Code2, Monitor, Box, Users } from 'lucide-react';
 import { Card } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { GroupInfo } from '../../stores/groups';
 import { GroupDetail } from './GroupDetail';
 
@@ -10,6 +11,8 @@ interface GroupCardProps {
 
 export function GroupCard({ group }: GroupCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const provider = group.model_provider || 'claude';
+  const executionMode = group.execution_mode || 'container';
 
   // 截短 JID 显示（保留前缀和后缀）
   const truncateJid = (jid: string) => {
@@ -36,6 +39,22 @@ export function GroupCard({ group }: GroupCardProps) {
               <h3 className="text-lg font-semibold text-foreground truncate">
                 {group.name}
               </h3>
+              <Badge variant="outline" className="gap-1 text-[10px] uppercase tracking-wide">
+                {provider === 'codex' ? (
+                  <Code2 className="w-3 h-3" />
+                ) : (
+                  <Bot className="w-3 h-3" />
+                )}
+                {provider}
+              </Badge>
+              <Badge variant="secondary" className="gap-1 text-[10px] uppercase tracking-wide">
+                {executionMode === 'host' ? (
+                  <Monitor className="w-3 h-3" />
+                ) : (
+                  <Box className="w-3 h-3" />
+                )}
+                {executionMode}
+              </Badge>
               {group.is_shared && (
                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-brand-100 text-primary text-[10px] font-medium flex-shrink-0">
                   <Users className="w-3 h-3" />

@@ -19,6 +19,7 @@ import {
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import {
   ClaudeCustomEnvSchema,
+  CodexConfigSchema,
   FeishuConfigSchema,
   TelegramConfigSchema,
   QQConfigSchema,
@@ -51,6 +52,10 @@ import {
   getFeishuProviderConfigWithSource,
   toPublicFeishuProviderConfig,
   saveFeishuProviderConfig,
+  getCodexProviderConfig,
+  getCodexProviderConfigWithSource,
+  toPublicCodexProviderConfig,
+  saveCodexProviderConfig,
   getTelegramProviderConfig,
   getTelegramProviderConfigWithSource,
   toPublicTelegramProviderConfig,
@@ -761,6 +766,72 @@ function applyBindingUpdate(imJid: string, updated: RegisteredGroup): void {
     webDeps.clearImFailCounts?.(imJid);
   }
 }
+
+// ─── Codex config ────────────────────────────────────────────────
+
+configRoutes.get('/codex', authMiddleware, systemConfigMiddleware, (c) => {
+  try {
+    const { config, source, homePath } = getCodexProviderConfigWithSource();
+    return c.json(toPublicCodexProviderConfig(config, source, homePath));
+  } catch (err) {
+    logger.error({ err }, 'Failed to load Codex config');
+    return c.json({ error: 'Failed to load Codex config' }, 500);
+  }
+});
+
+configRoutes.put(
+  '/codex',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = CodexConfigSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    const current = getCodexProviderConfig();
+    const next = { ...current };
+    if (typeof validation.data.authJson === 'string') {
+      next.authJson = validation.data.authJson;
+    } else if (validation.data.clearAuthJson === true) {
+      next.authJson = '';
+    }
+    if (typeof validation.data.configToml === 'string') {
+      next.configToml = validation.data.configToml;
+    } else if (validation.data.clearConfigToml === true) {
+      next.configToml = '';
+    }
+    if (typeof validation.data.openaiApiKey === 'string') {
+      next.openaiApiKey = validation.data.openaiApiKey;
+    } else if (validation.data.clearOpenaiApiKey === true) {
+      next.openaiApiKey = '';
+    }
+
+    try {
+      const saved = saveCodexProviderConfig({
+        authJson: next.authJson,
+        configToml: next.configToml,
+        openaiApiKey: next.openaiApiKey,
+      });
+      return c.json(
+        toPublicCodexProviderConfig(
+          saved,
+          saved.updatedAt ? 'runtime' : 'none',
+          saved.updatedAt ? getCodexProviderConfigWithSource().homePath : '',
+        ),
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Invalid Codex config payload';
+      logger.warn({ err }, 'Invalid Codex config payload');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
 
 configRoutes.get('/feishu', authMiddleware, systemConfigMiddleware, (c) => {
   logDeprecationOnce(
