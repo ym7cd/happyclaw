@@ -107,6 +107,24 @@ export interface ClaudeOAuthCredentials {
   subscriptionType?: string; // e.g. 'max', 'pro' — written to .credentials.json if present
 }
 
+export interface OAuthUsageBucket {
+  utilization: number; // 0-100
+  resets_at: string; // ISO 8601
+}
+
+export interface OAuthUsageResponse {
+  five_hour: OAuthUsageBucket | null;
+  seven_day: OAuthUsageBucket | null;
+  seven_day_opus: OAuthUsageBucket | null;
+  seven_day_sonnet: OAuthUsageBucket | null;
+}
+
+export interface CachedOAuthUsage {
+  data: OAuthUsageResponse;
+  fetchedAt: number; // Unix timestamp ms
+  error?: string;
+}
+
 export interface ClaudeProviderConfig {
   anthropicBaseUrl: string;
   anthropicAuthToken: string;
@@ -3931,3 +3949,23 @@ export function saveSystemSettings(
 
   return merged;
 }
+
+// ─── OAuth Usage Types ─────────────────────────────────────────────────────
+
+export interface OAuthUsageBucket {
+  utilization: number;
+  resets_at: string;
+}
+
+/**
+ * 解析 OAuth usage bucket 对象
+ * 运行时类型守卫，验证 API 响应结构
+ */
+export function parseOAuthUsageBucket(v: unknown): OAuthUsageBucket | null {
+  if (!v || typeof v !== "object") return null;
+  const obj = v as Record<string, unknown>;
+  if (typeof obj.utilization !== "number" || typeof obj.resets_at !== "string")
+    return null;
+  return { utilization: obj.utilization, resets_at: obj.resets_at };
+}
+

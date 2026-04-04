@@ -100,6 +100,7 @@ import {
   formatContextMessages,
   formatWorkspaceList,
   formatSystemStatus,
+  resolveBoundChatTarget,
   resolveLocationInfo,
   type WorkspaceInfo,
 } from './im-command-utils.js';
@@ -146,6 +147,7 @@ import {
   SubAgent,
 } from './types.js';
 import { logger } from './logger.js';
+import { resolveTaskOwner } from './task-utils.js';
 import {
   ensureAgentDirectories,
   isSystemMaintenanceNoise,
@@ -1020,27 +1022,38 @@ async function handleClearCommand(chatJid: string): Promise<string> {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return '未找到当前工作区';
 
-  const agentId = group.target_agent_id || undefined;
-  // IM 群绑定工作区主对话时，使用工作区 JID 清除上下文，
-  // 确保 divider 插入到工作区消息流（Web 端可见）。
-  const effectiveJid =
-    group.target_main_jid && !agentId ? group.target_main_jid : chatJid;
+  const target = resolveBoundChatTarget(
+    chatJid,
+    group,
+    (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+    getAgent,
+    findGroupNameByFolder,
+  );
 
   try {
     await executeSessionReset(
-      effectiveJid,
-      group.folder,
+      target.baseChatJid,
+      target.folder,
       {
         queue,
         sessions,
         broadcast: broadcastNewMessage,
         setLastAgentTimestamp: setCursors,
       },
-      agentId,
+      target.agentId ?? undefined,
     );
     return '已清除对话上下文 ✓';
   } catch (err) {
-    logger.error({ chatJid, agentId, err }, 'handleCommand /clear failed');
+    logger.error(
+      {
+        chatJid,
+        targetChatJid: target.targetChatJid,
+        targetFolder: target.folder,
+        agentId: target.agentId,
+        err,
+      },
+      'handleCommand /clear failed',
+    );
     return '清除上下文失败，请稍后重试';
   }
 }
@@ -1502,22 +1515,24 @@ function resolveSpawnWorkspace(
   let homeChatJid: string;
   let homeGroup: RegisteredGroup;
 
-  if (group.target_main_jid) {
-    const target =
-      registeredGroups[group.target_main_jid] ??
-      getRegisteredGroup(group.target_main_jid);
-    if (!target) return '绑定的工作区不存在';
-    homeChatJid = group.target_main_jid;
-    homeGroup = target;
-  } else if (group.target_agent_id) {
-    const agentInfo = getAgent(group.target_agent_id);
-    if (!agentInfo) return '绑定的 Agent 不存在';
-    const parent =
-      registeredGroups[agentInfo.chat_jid] ??
-      getRegisteredGroup(agentInfo.chat_jid);
-    if (!parent) return '绑定 Agent 所属的工作区不存在';
-    homeChatJid = agentInfo.chat_jid;
-    homeGroup = parent;
+  if (group.target_main_jid || group.target_agent_id) {
+    const target = resolveBoundChatTarget(
+      baseJid,
+      group,
+      (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+      getAgent,
+      findGroupNameByFolder,
+    );
+    const targetGroup =
+      registeredGroups[target.baseChatJid] ??
+      getRegisteredGroup(target.baseChatJid);
+    if (!targetGroup) {
+      return group.target_agent_id
+        ? '绑定 Agent 所属的工作区不存在'
+        : '绑定的工作区不存在';
+    }
+    homeChatJid = target.baseChatJid;
+    homeGroup = targetGroup;
   } else if (baseJid.startsWith('web:')) {
     homeChatJid = baseJid;
     homeGroup = group;
@@ -4458,6 +4473,12 @@ async function processTaskIpc(
             : data.execution_mode === 'container'
               ? 'container'
               : null;
+        const taskCreatedBy = resolveTaskOwner(
+          {},
+          sourceGroupEntry,
+          targetGroupEntry,
+        );
+
         createTask({
           id: taskId,
           group_folder: targetFolder,
@@ -4472,7 +4493,7 @@ async function processTaskIpc(
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),
-          created_by: sourceGroupEntry?.created_by,
+          created_by: taskCreatedBy,
           notify_channels: null,
         });
         logger.info(

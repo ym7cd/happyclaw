@@ -39,6 +39,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
+import { resolveTaskOwner } from './task-utils.js';
 import { removeFlowArtifacts } from './file-manager.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
@@ -115,21 +116,22 @@ function ensureTaskWorkspace(
 
   const executionMode = resolveTaskExecutionMode(task, deps);
 
+  const sourceGroup = Object.values(deps.registeredGroups()).find(
+    (g) => g.folder === task.group_folder,
+  );
+  const ownerId = resolveTaskOwner(task, sourceGroup);
+
   const group: RegisteredGroup = {
     name,
     folder,
     added_at: new Date().toISOString(),
     executionMode,
-    created_by: task.created_by,
+    created_by: ownerId,
   };
 
   setRegisteredGroup(jid, group);
   ensureChatExists(jid);
   updateChatName(jid, name);
-  // Resolve owner: prefer task.created_by, fallback to source group's owner
-  const ownerId = task.created_by
-    || Object.values(deps.registeredGroups()).find((g) => g.folder === task.group_folder)?.created_by
-    || null;
   if (ownerId) {
     addGroupMember(folder, ownerId, 'owner', ownerId);
   }
@@ -146,12 +148,12 @@ function ensureTaskWorkspace(
   task.workspace_folder = folder;
 
   logger.info(
-    { taskId: task.id, folder, jid, executionMode },
+    { taskId: task.id, folder, jid, executionMode, ownerId },
     'Created task workspace',
   );
 
   // Notify frontend via WebSocket so sidebar refreshes (scoped to task owner)
-  deps.onWorkspaceCreated?.(jid, folder, name, task.created_by ?? undefined);
+  deps.onWorkspaceCreated?.(jid, folder, name, ownerId);
 
   return { jid, folder };
 }
@@ -639,6 +641,71 @@ async function runScriptTask(
   updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
+/**
+ * Group context mode: inject task prompt as a regular message into the source workspace.
+ * The message is processed by the existing message pipeline (IPC if running, new container if idle).
+ */
+async function runGroupModeTask(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+  targetGroupJid: string,
+  manualRun = false,
+): Promise<void> {
+  const startTime = Date.now();
+
+  try {
+    // Resolve task owner for sender attribution
+    const owner = task.created_by ? getUserById(task.created_by) : null;
+    const senderName = owner?.display_name || owner?.username || '定时任务';
+
+    if (!deps.storePromptMessage) {
+      throw new Error('storePromptMessage dependency not available');
+    }
+
+    // Store prompt as a user message in the source workspace chat
+    deps.storePromptMessage(
+      targetGroupJid,
+      owner?.id || 'system',
+      senderName,
+      task.prompt,
+    );
+
+    // Trigger normal message processing for the source workspace
+    deps.queue.enqueueMessageCheck(targetGroupJid);
+
+    logger.info(
+      { taskId: task.id, targetGroupJid, contextMode: 'group' },
+      'Group-mode task injected into source workspace',
+    );
+
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: 'success',
+      result: '已注入到源工作区',
+      error: null,
+    });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.error({ taskId: task.id, error }, 'Group-mode task injection failed');
+
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: 'error',
+      result: null,
+      error,
+    });
+  }
+
+  // Update next_run (manualRun preserves original schedule)
+  const nextRun = manualRun ? task.next_run : computeNextRun(task);
+  const resultSummary = '已注入到源工作区';
+  updateTaskAfterRun(task.id, nextRun, resultSummary);
+}
+
 let schedulerRunning = false;
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 let lastCleanupTime = 0;
@@ -757,9 +824,16 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               'Unhandled error in runScriptTask',
             );
           });
+        } else if (currentTask.context_mode === 'group') {
+          // Group mode: inject prompt into source workspace as a regular message
+          runGroupModeTask(currentTask, deps, targetGroupJid).catch((err) => {
+            logger.error(
+              { taskId: currentTask.id, err },
+              'Unhandled error in runGroupModeTask',
+            );
+          });
         } else {
-          // Each agent task has a dedicated workspace; use workspace JID or
-          // fallback to targetGroupJid for queue serialization key
+          // Isolated mode (default): each agent task has a dedicated workspace
           const taskQueueJid = currentTask.workspace_jid
             ? `${currentTask.workspace_jid}#task:${currentTask.id}`
             : `${targetGroupJid}#task:${currentTask.id}`;
@@ -807,6 +881,10 @@ export function triggerTaskNow(
       return { success: false, error: 'Script concurrency limit reached' };
     runScriptTask(task, deps, targetGroupJid, true).catch((err) =>
       logger.error({ taskId, err }, 'Manual script task failed'),
+    );
+  } else if (task.context_mode === 'group') {
+    runGroupModeTask(task, deps, targetGroupJid, true).catch((err) =>
+      logger.error({ taskId, err }, 'Manual group-mode task failed'),
     );
   } else {
     const opts: RunTaskOptions = { manualRun: true, taskRunId: task.id };
