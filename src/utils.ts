@@ -18,6 +18,25 @@ export function stripAgentInternalTags(text: string): string {
 }
 
 /**
+ * Strip raw OpenAI web citation markers when the client cannot render them.
+ * Example: `...。citeturn1search0`
+ */
+export function stripOpenAICitationMarkers(text: string): string {
+  return text
+    .replace(/\s*cite[^]+/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Normalize agent output before it is sent to users or persisted.
+ */
+export function normalizeAgentOutputText(text: string): string {
+  return stripOpenAICitationMarkers(stripAgentInternalTags(text));
+}
+
+/**
  * Detect whether an agent output is system-maintenance noise that should
  * be suppressed from IM delivery when sourceKind is 'auto_continue'.
  *

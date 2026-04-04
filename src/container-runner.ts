@@ -333,6 +333,46 @@ function ensureCodexHomeBootstrap(groupSessionsDir: string): void {
   }
 }
 
+function linkSessionSkills(
+  sessionHomeDir: string,
+  ownerId?: string,
+): void {
+  const skillsDir = path.join(sessionHomeDir, 'skills');
+  fs.mkdirSync(skillsDir, { recursive: true });
+  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+    const entryPath = path.join(skillsDir, entry.name);
+    try {
+      if (entry.isSymbolicLink() || entry.isDirectory()) {
+        fs.rmSync(entryPath, { recursive: true, force: true });
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const linkSkillEntries = (sourceDir: string) => {
+    if (!fs.existsSync(sourceDir)) return;
+    for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const linkPath = path.join(skillsDir, entry.name);
+      try {
+        if (fs.existsSync(linkPath)) {
+          fs.rmSync(linkPath, { recursive: true, force: true });
+        }
+        fs.symlinkSync(path.join(sourceDir, entry.name), linkPath);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  const projectRoot = process.cwd();
+  linkSkillEntries(path.join(projectRoot, 'container', 'skills'));
+  if (ownerId) {
+    linkSkillEntries(path.join(DATA_DIR, 'skills', ownerId));
+  }
+}
+
 function withProviderAnnotatedOutput(
   provider: ModelProvider,
   onOutput?: (output: ContainerOutput) => Promise<void>,
@@ -1229,52 +1269,18 @@ export async function runHostAgent(
       ? loadUserMcpServers(group.created_by)
       : {};
     ensureSettingsJson(settingsFile, hostMcpServers);
+  }
 
-    // 4. Skills 自动链接到 session 目录
-    // 链接顺序：项目级 → 用户级(覆盖同名项目级)
-    // 用户的所有 skills 在所有工作区中生效
-    try {
-      const skillsDir = path.join(groupSessionsDir, 'skills');
-      fs.mkdirSync(skillsDir, { recursive: true });
-      for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
-        const entryPath = path.join(skillsDir, entry.name);
-        try {
-          if (entry.isSymbolicLink() || entry.isDirectory()) {
-            fs.rmSync(entryPath, { recursive: true, force: true });
-          }
-        } catch {
-          /* ignore */
-        }
-      }
-
-      const linkSkillEntries = (sourceDir: string) => {
-        if (!fs.existsSync(sourceDir)) return;
-        for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
-          if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-          const linkPath = path.join(skillsDir, entry.name);
-          try {
-            if (fs.existsSync(linkPath)) {
-              fs.rmSync(linkPath, { recursive: true, force: true });
-            }
-            fs.symlinkSync(path.join(sourceDir, entry.name), linkPath);
-          } catch {
-            /* ignore */
-          }
-        }
-      };
-
-      const projectRoot = process.cwd();
-      linkSkillEntries(path.join(projectRoot, 'container', 'skills'));
-      const ownerId = group.created_by;
-      if (ownerId) {
-        linkSkillEntries(path.join(DATA_DIR, 'skills', ownerId));
-      }
-    } catch (err) {
-      logger.warn(
-        { folder: group.folder, err },
-        '宿主机模式 skills 符号链接失败',
-      );
-    }
+  // 4. Skills 自动链接到 session 目录
+  // 链接顺序：项目级 → 用户级(覆盖同名项目级)
+  // 用户的所有 skills 在所有工作区中生效
+  try {
+    linkSessionSkills(groupSessionsDir, group.created_by);
+  } catch (err) {
+    logger.warn(
+      { folder: group.folder, err },
+      '宿主机模式 skills 符号链接失败',
+    );
   }
 
   // 5. 构建环境变量

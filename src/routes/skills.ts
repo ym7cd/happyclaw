@@ -77,8 +77,12 @@ function getUserSkillsDir(userId: string): string {
   return path.join(DATA_DIR, 'skills', userId);
 }
 
-function getGlobalSkillsDir(): string {
+function getClaudeHostSkillsDir(): string {
   return path.join(os.homedir(), '.claude', 'skills');
+}
+
+function getCodexHostSkillsDir(): string {
+  return path.join(os.homedir(), '.codex', 'skills');
 }
 
 function getProjectSkillsDir(): string {
@@ -366,6 +370,42 @@ function copySkillToUser(src: string, dest: string): void {
   }
 
   fs.cpSync(realSrc, dest, { recursive: true });
+}
+
+function listHostSkillEntries(dir: string): string[] {
+  const names: string[] = [];
+  if (!fs.existsSync(dir)) return names;
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    const skillDir = path.join(dir, entry.name);
+    try {
+      const realPath = fs.realpathSync(skillDir);
+      if (
+        fs.existsSync(path.join(realPath, 'SKILL.md')) ||
+        fs.existsSync(path.join(realPath, 'SKILL.md.disabled'))
+      ) {
+        names.push(entry.name);
+      }
+    } catch {
+      // skip broken symlinks
+    }
+  }
+
+  return names;
+}
+
+function collectHostSkillSources(): Map<string, string> {
+  const sources = new Map<string, string>();
+
+  // Lower priority first, then higher priority override.
+  for (const dir of [getCodexHostSkillsDir(), getClaudeHostSkillsDir()]) {
+    for (const name of listHostSkillEntries(dir)) {
+      sources.set(name, path.join(dir, name));
+    }
+  }
+
+  return sources;
 }
 
 // --- Search cache (LRU, 5min TTL, max 100 entries) ---
@@ -834,36 +874,20 @@ async function installSkillForUser(
 }
 
 /**
- * Sync host-level skills (~/.claude/skills/) to a user's directory.
+ * Sync host-level skills (~/.claude/skills + ~/.codex/skills) to a user's directory.
+ * When both host dirs contain the same skill ID, ~/.claude/skills wins.
  * Standalone function usable from both the API route and the auto-sync timer.
  */
 async function syncHostSkillsForUser(
   userId: string,
 ): Promise<{ stats: { added: number; updated: number; deleted: number; skipped: number }; total: number }> {
   return withSkillInstallLock(async () => {
-    const hostDir = getGlobalSkillsDir();
     const userDir = getUserSkillsDir(userId);
     fs.mkdirSync(userDir, { recursive: true });
 
-    // 1. 扫描宿主机 skills
-    const hostSkillNames: string[] = [];
-    if (fs.existsSync(hostDir)) {
-      for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
-        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-        const skillDir = path.join(hostDir, entry.name);
-        try {
-          const realPath = fs.realpathSync(skillDir);
-          if (
-            fs.existsSync(path.join(realPath, 'SKILL.md')) ||
-            fs.existsSync(path.join(realPath, 'SKILL.md.disabled'))
-          ) {
-            hostSkillNames.push(entry.name);
-          }
-        } catch {
-          // 跳过 broken symlinks
-        }
-      }
-    }
+    // 1. 扫描宿主机 skills（优先级：~/.codex/skills < ~/.claude/skills）
+    const hostSkillSources = collectHostSkillSources();
+    const hostSkillNames = [...hostSkillSources.keys()];
 
     // 2. 读取 manifest
     const manifest = readHostSyncManifest(userId);
@@ -889,7 +913,8 @@ async function syncHostSkillsForUser(
         continue;
       }
 
-      const src = path.join(hostDir, name);
+      const src = hostSkillSources.get(name);
+      if (!src) continue;
       const dest = path.join(userDir, name);
 
       if (existingUserSkills.has(name)) {
@@ -996,5 +1021,12 @@ skillsRoutes.post('/:id/reinstall', authMiddleware, async (c) => {
   return c.json({ success: true, installed: installResult.installed });
 });
 
-export { getUserSkillsDir, installSkillForUser, deleteSkillForUser, syncHostSkillsForUser };
+export {
+  getUserSkillsDir,
+  installSkillForUser,
+  deleteSkillForUser,
+  syncHostSkillsForUser,
+  getClaudeHostSkillsDir,
+  getCodexHostSkillsDir,
+};
 export default skillsRoutes;

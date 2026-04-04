@@ -239,4 +239,90 @@ process.stdin.on('end', () => {
     cleanupGroupArtifacts(claudeGroup.folder);
     cleanupGroupArtifacts(codexGroup.folder);
   });
+
+  it('projects shared skills into Codex host session home', async () => {
+    const fakeRunnerDir = makeTempDir('happyclaw-host-skills-runner-');
+    const fakeRunnerEntry = path.join(fakeRunnerDir, 'fake-runner.cjs');
+    writeExecutable(
+      fakeRunnerEntry,
+      String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+
+let stdin = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  stdin += chunk;
+});
+process.stdin.on('end', () => {
+  const provider = process.env.HAPPYCLAW_MODEL_PROVIDER;
+  const sessionHome = provider === 'codex'
+    ? (process.env.CODEX_HOME || '')
+    : (process.env.CLAUDE_CONFIG_DIR || '');
+  const skillsDir = path.join(sessionHome, 'skills');
+  const payload = {
+    provider,
+    hasProjectSkill: fs.existsSync(path.join(skillsDir, 'project-shared', 'SKILL.md')),
+    hasUserSkill: fs.existsSync(path.join(skillsDir, 'user-shared', 'SKILL.md')),
+  };
+  console.log('---HAPPYCLAW_OUTPUT_START---');
+  console.log(JSON.stringify({
+    status: 'success',
+    result: JSON.stringify(payload),
+    newSessionId: provider + '-skills-session',
+    sessionId: provider + '-skills-session',
+  }));
+  console.log('---HAPPYCLAW_OUTPUT_END---');
+});
+`,
+    );
+
+    const fakeGlobalCodexHome = makeTempDir('happyclaw-global-codex-home-');
+    fs.writeFileSync(path.join(fakeGlobalCodexHome, 'auth.json'), '{"token":"x"}\n');
+    fs.writeFileSync(path.join(fakeGlobalCodexHome, 'config.toml'), 'model = "gpt-5"\n');
+
+    const userId = `skills-user-${Date.now()}`;
+    const projectSkillDir = path.join(process.cwd(), 'container', 'skills', 'project-shared');
+    const userSkillDir = path.join(DATA_DIR, 'skills', userId, 'user-shared');
+    fs.mkdirSync(projectSkillDir, { recursive: true });
+    fs.mkdirSync(userSkillDir, { recursive: true });
+    fs.writeFileSync(path.join(projectSkillDir, 'SKILL.md'), '---\nname: project-shared\n---\n');
+    fs.writeFileSync(path.join(userSkillDir, 'SKILL.md'), '---\nname: user-shared\n---\n');
+
+    setEnv('HAPPYCLAW_CODEX_RUNNER_ENTRY', fakeRunnerEntry);
+    setEnv('CODEX_HOME', fakeGlobalCodexHome);
+
+    const codexGroup: RegisteredGroup = {
+      name: 'Codex Host Group Skills',
+      folder: `codex-host-skills-${Date.now()}`,
+      added_at: new Date().toISOString(),
+      executionMode: 'host',
+      modelProvider: 'codex',
+      created_by: userId,
+    };
+
+    cleanupGroupArtifacts(codexGroup.folder);
+    fs.mkdirSync(path.join(GROUPS_DIR, codexGroup.folder), { recursive: true });
+
+    const result = await runHostAgent(
+      codexGroup,
+      {
+        prompt: 'codex prompt',
+        groupFolder: codexGroup.folder,
+        chatJid: 'web:codex-skills',
+        isMain: false,
+      },
+      (_proc: ChildProcess, _id: string) => {},
+    );
+
+    expect(result.status).toBe('success');
+    const payload = JSON.parse(String(result.result)) as Record<string, unknown>;
+    expect(payload.provider).toBe('codex');
+    expect(payload.hasProjectSkill).toBe(true);
+    expect(payload.hasUserSkill).toBe(true);
+
+    cleanupGroupArtifacts(codexGroup.folder);
+    fs.rmSync(path.join(DATA_DIR, 'skills', userId), { recursive: true, force: true });
+    fs.rmSync(projectSkillDir, { recursive: true, force: true });
+  });
 });

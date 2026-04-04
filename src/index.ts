@@ -149,7 +149,7 @@ import { logger } from './logger.js';
 import {
   ensureAgentDirectories,
   isSystemMaintenanceNoise,
-  stripAgentInternalTags,
+  normalizeAgentOutputText,
   stripVirtualJidSuffix,
 } from './utils.js';
 import { normalizeImageAttachments } from './message-attachments.js';
@@ -2728,7 +2728,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               typeof result.result === 'string'
                 ? result.result
                 : JSON.stringify(result.result);
-            let text = stripAgentInternalTags(raw);
+            let text = normalizeAgentOutputText(raw);
             if (
               result.sourceKind === 'overflow_partial' ||
               result.sourceKind === 'compact_partial'
@@ -3290,7 +3290,7 @@ async function runTerminalWarmup(chatJid: string): Promise<void> {
           typeof result.result === 'string'
             ? result.result
             : JSON.stringify(result.result);
-        const text = stripAgentInternalTags(raw);
+        const text = normalizeAgentOutputText(raw);
         if (!text || text === warmupReadyToken) return;
         await sendMessage(chatJid, text);
         resetIdleTimer();
@@ -5218,7 +5218,7 @@ async function processAgentConversation(
         typeof output.result === 'string'
           ? output.result
           : JSON.stringify(output.result);
-      let text = stripAgentInternalTags(raw);
+      let text = normalizeAgentOutputText(raw);
       if (
         output.sourceKind === 'overflow_partial' ||
         output.sourceKind === 'compact_partial'

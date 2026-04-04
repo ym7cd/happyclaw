@@ -23,6 +23,14 @@ interface MarkdownRendererProps {
   streaming?: boolean;
 }
 
+function stripOpenAICitationMarkers(text: string): string {
+  return text
+    .replace(/\s*cite[^]+/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** Resolve relative image paths to the file download API */
 function resolveImageSrc(src: string, groupJid?: string): string {
   if (!groupJid || !src) return src;
@@ -190,6 +198,10 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, groupJ
     ? 'text-base leading-[1.65] text-foreground'
     : 'text-sm leading-6 text-foreground';
   const tableTextClass = variant === 'chat' ? 'text-[0.95em]' : 'text-sm';
+  const normalizedContent = useMemo(
+    () => stripOpenAICitationMarkers(content),
+    [content],
+  );
 
   // Streaming mode: skip expensive KaTeX + sanitize for faster renders
   const remarkPluginsList = useMemo(() =>
@@ -211,8 +223,10 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, groupJ
   return (
     <div className={textSizeClass}>
       <ReactMarkdown
+        children={normalizedContent}
         remarkPlugins={remarkPluginsList as any}
         rehypePlugins={rehypePluginsList as any}
+        skipHtml={false}
         components={{
           code: (props) => <CodeBlock {...props} variant={variant} />,
           img: ({ src, alt }) => <MarkdownImage src={src ? resolveImageSrc(src, groupJid) : undefined} alt={alt} loading="lazy" />,
@@ -280,9 +294,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, groupJ
             </blockquote>
           ),
         }}
-      >
-        {content}
-      </ReactMarkdown>
+      />
     </div>
   );
 });
