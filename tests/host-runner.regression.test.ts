@@ -325,4 +325,73 @@ process.stdin.on('end', () => {
     fs.rmSync(path.join(DATA_DIR, 'skills', userId), { recursive: true, force: true });
     fs.rmSync(projectSkillDir, { recursive: true, force: true });
   });
+
+  it('stores host-mode logs under group data even when customCwd is set', async () => {
+    const fakeRunnerDir = makeTempDir('happyclaw-host-logs-runner-');
+    const fakeRunnerEntry = path.join(fakeRunnerDir, 'fake-runner.cjs');
+    writeExecutable(
+      fakeRunnerEntry,
+      String.raw`#!/usr/bin/env node
+let stdin = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  stdin += chunk;
+});
+process.stdin.on('end', () => {
+  const provider = process.env.HAPPYCLAW_MODEL_PROVIDER;
+  console.log('---HAPPYCLAW_OUTPUT_START---');
+  console.log(JSON.stringify({
+    status: 'success',
+    result: provider + '-ok',
+    newSessionId: provider + '-logs-session',
+    sessionId: provider + '-logs-session',
+  }));
+  console.log('---HAPPYCLAW_OUTPUT_END---');
+});
+`,
+    );
+
+    const fakeGlobalCodexHome = makeTempDir('happyclaw-global-codex-home-');
+    fs.writeFileSync(path.join(fakeGlobalCodexHome, 'auth.json'), '{"token":"x"}\n');
+    fs.writeFileSync(path.join(fakeGlobalCodexHome, 'config.toml'), 'model = "gpt-5"\n');
+
+    setEnv('HAPPYCLAW_CODEX_RUNNER_ENTRY', fakeRunnerEntry);
+    setEnv('CODEX_HOME', fakeGlobalCodexHome);
+
+    const customCwd = fs.mkdtempSync(
+      path.join(os.homedir(), 'happyclaw-custom-cwd-'),
+    );
+    tempDirs.push(customCwd);
+    const codexGroup: RegisteredGroup = {
+      name: 'Codex Host Group Logs',
+      folder: `codex-host-logs-${Date.now()}`,
+      added_at: new Date().toISOString(),
+      executionMode: 'host',
+      modelProvider: 'codex',
+      customCwd,
+    };
+
+    cleanupGroupArtifacts(codexGroup.folder);
+    fs.mkdirSync(path.join(GROUPS_DIR, codexGroup.folder), { recursive: true });
+
+    const result = await runHostAgent(
+      codexGroup,
+      {
+        prompt: 'codex prompt',
+        groupFolder: codexGroup.folder,
+        chatJid: 'web:codex-logs',
+        isMain: false,
+      },
+      (_proc: ChildProcess, _id: string) => {},
+    );
+
+    expect(result.status).toBe('success');
+    expect(fs.existsSync(path.join(customCwd, 'logs'))).toBe(false);
+
+    const groupLogsDir = path.join(GROUPS_DIR, codexGroup.folder, 'logs');
+    expect(fs.existsSync(groupLogsDir)).toBe(true);
+    expect(fs.readdirSync(groupLogsDir).length).toBeGreaterThan(0);
+
+    cleanupGroupArtifacts(codexGroup.folder);
+  });
 });
