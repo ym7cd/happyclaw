@@ -126,6 +126,20 @@ const fields: FieldConfig[] = [
     max: 600,
     step: 5,
   },
+  {
+    key: 'autoCompactWindow',
+    label: '对话自动压缩阈值',
+    description:
+      '达到该 token 数时主动触发 SDK 对话压缩。0 = 保留 SDK 默认（约 1M）。'
+      + '经验值：Opus 1M 建议 300-500，Sonnet/Haiku 200K 建议 80-120。'
+      + '压缩前会通过 PreCompact hook 归档对话',
+    unit: 'K tokens',
+    toDisplay: (v) => Math.round(v / 1000),
+    toStored: (v) => v * 1000,
+    min: 0,
+    max: 2000,
+    step: 10,
+  },
 ];
 
 export function SystemSettingsSection() {
@@ -137,6 +151,7 @@ export function SystemSettingsSection() {
   const [billingMinStartBalanceUsd, setBillingMinStartBalanceUsd] = useState(0.01);
   const [billingCurrency, setBillingCurrency] = useState('USD');
   const [billingCurrencyRate, setBillingCurrencyRate] = useState(1);
+  const [externalClaudeDir, setExternalClaudeDir] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -161,6 +176,7 @@ export function SystemSettingsSection() {
         setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
         setBillingCurrency(data.billingCurrency ?? 'USD');
         setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
+        setExternalClaudeDir(data.externalClaudeDir ?? '');
       } catch (err) {
         toast.error(getErrorMessage(err, '加载系统参数失败'));
       } finally {
@@ -205,6 +221,7 @@ export function SystemSettingsSection() {
         billingMinStartBalanceUsd,
         billingCurrency,
         billingCurrencyRate,
+        externalClaudeDir,
       };
       for (const f of fields) {
         const val = displayValues[f.key];
@@ -223,6 +240,7 @@ export function SystemSettingsSection() {
       setBillingMinStartBalanceUsd(data.billingMinStartBalanceUsd ?? 0.01);
       setBillingCurrency(data.billingCurrency ?? 'USD');
       setBillingCurrencyRate(data.billingCurrencyRate ?? 1);
+      setExternalClaudeDir(data.externalClaudeDir ?? '');
       // 刷新计费状态，更新导航栏可见性
       loadBillingStatus();
       toast.success('系统参数已保存，新参数将对后续启动的容器/进程生效');

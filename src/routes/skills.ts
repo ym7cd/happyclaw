@@ -10,7 +10,7 @@ import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
-import { getSystemSettings, saveSystemSettings, type SystemSettings } from '../runtime-config.js';
+import { getEffectiveExternalDir } from '../runtime-config.js';
 import {
   parseFrontmatter,
   validateSkillId,
@@ -30,9 +30,8 @@ interface Skill {
   id: string;
   name: string;
   description: string;
-  source: 'user' | 'project';
+  source: 'user' | 'project' | 'external';
   enabled: boolean;
-  syncedFromHost?: boolean;
   packageName?: string;
   installedAt?: string;
   userInvocable: boolean;
@@ -84,7 +83,6 @@ function getClaudeHostSkillsDir(): string {
 function getCodexHostSkillsDir(): string {
   return path.join(os.homedir(), '.codex', 'skills');
 }
-
 function getProjectSkillsDir(): string {
   return path.resolve(process.cwd(), 'container', 'skills');
 }
@@ -169,21 +167,27 @@ function scanDirectory(rootDir: string, source: 'user' | 'project'): Skill[] {
   return scanSkillDirectory(rootDir, source) as Skill[];
 }
 
-function discoverSkills(userId: string): Skill[] {
+function discoverSkills(userId: string, userRole?: string): Skill[] {
   const userSkills = scanDirectory(getUserSkillsDir(userId), 'user');
   const projectSkills = scanDirectory(getProjectSkillsDir(), 'project');
 
-  // 读取 host sync manifest 标记同步来源
-  const hostManifest = readHostSyncManifest(userId);
-  const syncedSet = new Set(hostManifest.syncedSkills);
+  // 宿主机 ~/.claude/skills（仅 admin 可见）
+  const externalSkills: Skill[] = [];
+  if (userRole === 'admin') {
+    const extSkillsDir = path.join(getEffectiveExternalDir(), 'skills');
+    if (fs.existsSync(extSkillsDir)) {
+      const scanned = scanDirectory(extSkillsDir, 'project');
+      for (const s of scanned) {
+        (s as any).source = 'external';
+      }
+      externalSkills.push(...scanned);
+    }
+  }
 
   // 读取 skills manifest 补充安装元数据
   const skillsManifest = readSkillsManifest(userId);
 
   for (const skill of userSkills) {
-    if (syncedSet.has(skill.id)) {
-      skill.syncedFromHost = true;
-    }
     const meta = skillsManifest.skills[skill.id];
     if (meta) {
       skill.packageName = meta.packageName;
@@ -191,19 +195,32 @@ function discoverSkills(userId: string): Skill[] {
     }
   }
 
-  return [...userSkills, ...projectSkills];
+  // 按优先级去重（user > project > external），同 ID 高优先级覆盖低优先级
+  const seen = new Set<string>();
+  const result: Skill[] = [];
+  for (const skill of [...userSkills, ...projectSkills, ...externalSkills]) {
+    if (!seen.has(skill.id)) {
+      seen.add(skill.id);
+      result.push(skill);
+    }
+  }
+  return result;
 }
 
-function getSkillDetail(skillId: string, userId: string): SkillDetail | null {
+function getSkillDetail(skillId: string, userId: string, userRole?: string): SkillDetail | null {
   if (!validateSkillId(skillId)) return null;
 
-  const searchDirs: Array<{ rootDir: string; source: 'user' | 'project' }> = [
+  const searchDirs: Array<{ rootDir: string; source: 'user' | 'project' | 'external' }> = [
     { rootDir: getUserSkillsDir(userId), source: 'user' },
     { rootDir: getProjectSkillsDir(), source: 'project' },
   ];
+  if (userRole === 'admin') {
+    const extSkillsDir = path.join(getEffectiveExternalDir(), 'skills');
+    if (fs.existsSync(extSkillsDir)) {
+      searchDirs.push({ rootDir: extSkillsDir, source: 'external' });
+    }
+  }
 
-  const hostManifest = readHostSyncManifest(userId);
-  const syncedSet = new Set(hostManifest.syncedSkills);
   const skillsManifest = readSkillsManifest(userId);
 
   for (const { rootDir, source } of searchDirs) {
@@ -253,9 +270,6 @@ function getSkillDetail(skillId: string, userId: string): SkillDetail | null {
       };
 
       if (source === 'user') {
-        if (syncedSet.has(skillId)) {
-          detail.syncedFromHost = true;
-        }
         const meta = skillsManifest.skills[skillId];
         if (meta) {
           detail.packageName = meta.packageName;
@@ -564,7 +578,7 @@ async function withSkillInstallLock<T>(fn: () => Promise<T>): Promise<T> {
 
 skillsRoutes.get('/', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
-  const skills = discoverSkills(authUser.id);
+  const skills = discoverSkills(authUser.id, authUser.role);
   return c.json({ skills });
 });
 
@@ -643,44 +657,11 @@ skillsRoutes.get('/search/detail', authMiddleware, async (c) => {
   return c.json({ detail: null });
 });
 
-// Get sync status (last sync time + auto-sync config)
-skillsRoutes.get('/sync-status', authMiddleware, (c) => {
-  const authUser = c.get('user') as AuthUser;
-  const manifest = readHostSyncManifest(authUser.id);
-  const settings = getSystemSettings();
-  return c.json({
-    lastSyncAt: manifest.lastSyncAt || null,
-    syncedCount: manifest.syncedSkills.length,
-    autoSyncEnabled: settings.skillAutoSyncEnabled,
-    autoSyncIntervalMinutes: settings.skillAutoSyncIntervalMinutes,
-  });
-});
-
-// Toggle auto-sync on/off (admin only)
-skillsRoutes.put('/sync-settings', authMiddleware, async (c) => {
-  const authUser = c.get('user') as AuthUser;
-  if (authUser.role !== 'admin') {
-    return c.json({ error: 'Only admin can change sync settings' }, 403);
-  }
-  const body = await c.req.json().catch(() => ({}));
-  const updates: Partial<SystemSettings> = {};
-  if (typeof body.autoSyncEnabled === 'boolean') {
-    updates.skillAutoSyncEnabled = body.autoSyncEnabled;
-  }
-  if (typeof body.autoSyncIntervalMinutes === 'number' && body.autoSyncIntervalMinutes >= 1) {
-    updates.skillAutoSyncIntervalMinutes = body.autoSyncIntervalMinutes;
-  }
-  const saved = saveSystemSettings(updates);
-  return c.json({
-    autoSyncEnabled: saved.skillAutoSyncEnabled,
-    autoSyncIntervalMinutes: saved.skillAutoSyncIntervalMinutes,
-  });
-});
 
 skillsRoutes.get('/:id', authMiddleware, (c) => {
   const id = c.req.param('id');
   const authUser = c.get('user') as AuthUser;
-  const skill = getSkillDetail(id, authUser.id);
+  const skill = getSkillDetail(id, authUser.id, authUser.role);
 
   if (!skill) {
     return c.json({ error: 'Skill not found' }, 404);
@@ -768,6 +749,28 @@ function deleteSkillForUser(
     };
   }
 }
+
+// 批量删除所有用户级技能（清理旧的同步副本）
+skillsRoutes.delete('/user-all', authMiddleware, (c) => {
+  const authUser = c.get('user') as AuthUser;
+  const userDir = getUserSkillsDir(authUser.id);
+  let deleted = 0;
+  try {
+    if (fs.existsSync(userDir)) {
+      for (const entry of fs.readdirSync(userDir, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue;
+        const p = path.join(userDir, entry.name);
+        try {
+          fs.rmSync(p, { recursive: true, force: true });
+          deleted++;
+        } catch { /* ignore */ }
+      }
+    }
+  } catch {
+    return c.json({ error: 'Failed to delete user skills' }, 500);
+  }
+  return c.json({ success: true, deleted });
+});
 
 skillsRoutes.delete('/:id', authMiddleware, async (c) => {
   const id = c.req.param('id');
@@ -958,7 +961,6 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
   const result = await syncHostSkillsForUser(authUser.id);
   return c.json(result);
 });
-
 skillsRoutes.post('/install', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   const body = await c.req.json().catch(() => ({}));

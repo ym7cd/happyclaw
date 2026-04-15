@@ -45,6 +45,7 @@ import { hasScriptCapacity, runScript } from './script-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
 import { ExecutionMode, RegisteredGroup, ScheduledTask } from './types.js';
 import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
+import { stripAgentInternalTags } from './utils.js';
 
 /**
  * Resolve the actual group JID to send a task to.
@@ -169,6 +170,7 @@ export interface SchedulerDependencies {
     groupFolder: string,
     displayName?: string,
     taskRunId?: string,
+    selectedProviderId?: string | null,
   ) => void;
   sendMessage: (
     jid: string,
@@ -179,6 +181,17 @@ export interface SchedulerDependencies {
   onWorkspaceCreated?: (jid: string, folder: string, name: string, userId?: string) => void;
   /** Store task prompt as a user-visible message in the workspace chat */
   storePromptMessage?: (chatJid: string, senderId: string, senderName: string, text: string) => void;
+  /** Store task result in workspace chat and push to owner's IM channels */
+  storeResultAndNotify?: (
+    chatJid: string,
+    text: string,
+    options: {
+      ownerId?: string;
+      notifyChannels?: string[] | null;
+      sourceKind?: ContainerOutput['sourceKind'];
+      skipStore?: boolean;
+    },
+  ) => Promise<void>;
   assistantName: string;
   dailySummaryDeps?: DailySummaryDeps;
 }
@@ -264,6 +277,8 @@ async function runTask(
       result: null,
       error: `Workspace group not found: ${workspace.jid}`,
     });
+    const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
+    updateTaskAfterRun(task.id, nextRun, `Error: Workspace group not found: ${workspace.jid}`);
     runningTaskIds.delete(task.id);
     return;
   }
@@ -346,7 +361,8 @@ async function runTask(
   const finalizeRunLog = () => {
     if (runLogFinalized) return;
     runLogFinalized = true;
-    runningTaskIds.delete(task.id);
+    // 注意：runningTaskIds.delete() 不在此处调用，
+    // 必须等到 updateTaskAfterRun() ��新 next_run 后才能释放防重复屏障（#363）
     const durationMs = lastOutputTime - startTime;
     updateTaskRunLog(runLogId, {
       duration_ms: durationMs,
@@ -402,7 +418,7 @@ async function runTask(
         isScheduledTask: true,
         taskRunId: options?.taskRunId,
       },
-      (proc, identifier) =>
+      (proc, identifier, selectedProviderId) =>
         deps.onProcess(
           effectiveJid,
           proc,
@@ -410,6 +426,7 @@ async function runTask(
           workspace.folder,
           identifier,
           options?.taskRunId,
+          selectedProviderId,
         ),
       async (streamedOutput: ContainerOutput) => {
         // Broadcast stream events to WebSocket clients viewing the task workspace
@@ -458,7 +475,6 @@ async function runTask(
     lastOutputTime = Date.now();
     logger.error({ taskId: task.id, error }, 'Task failed');
   } finally {
-    runningTaskIds.delete(task.id);
     // Clean up isolated task IPC directory
     if (options?.taskRunId) {
       const taskRunDir = path.join(
@@ -487,7 +503,32 @@ async function runTask(
     : result
       ? result.slice(0, 200)
       : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  try {
+    updateTaskAfterRun(task.id, nextRun, resultSummary);
+  } finally {
+    runningTaskIds.delete(task.id);
+  }
+
+  if (deps.storeResultAndNotify && (result || error)) {
+    const text = error
+      ? `执行出错: ${error}`
+      : stripAgentInternalTags(result!);
+
+    if (text) {
+      try {
+        await deps.storeResultAndNotify(workspace.jid, text, {
+          ownerId: workspaceGroup.created_by || undefined,
+          notifyChannels: task.notify_channels,
+          sourceKind: 'sdk_final',
+        });
+      } catch (err) {
+        logger.error(
+          { taskId: task.id, err },
+          'Failed to store/notify task result',
+        );
+      }
+    }
+  }
 
   // Auto-cleanup once-task workspace after completion
   if (task.schedule_type === 'once' && !options?.manualRun && task.workspace_jid && task.workspace_folder) {
@@ -576,6 +617,8 @@ async function runScriptTask(
       result: null,
       error: 'script_command is empty',
     });
+    const nextRun = manualRun ? task.next_run : computeNextRun(task);
+    updateTaskAfterRun(task.id, nextRun, 'Error: script_command is empty');
     runningTaskIds.delete(task.id);
     return;
   }
@@ -603,8 +646,28 @@ async function runScriptTask(
       const text = error
         ? `[脚本] 执行失败: ${error}${result ? `\n输出:\n${result.slice(0, 500)}` : ''}`
         : `[脚本] ${result!.slice(0, 1000)}`;
+      const fullText = `${deps.assistantName}: ${text}`;
 
-      await deps.sendMessage(groupJid, `${deps.assistantName}: ${text}`, { source: 'scheduled_task' });
+      await deps.sendMessage(groupJid, fullText, { source: 'scheduled_task' });
+
+      if (deps.storeResultAndNotify) {
+        const groups = deps.registeredGroups();
+        const group = groups[groupJid];
+        if (group?.created_by) {
+          try {
+            await deps.storeResultAndNotify(groupJid, fullText, {
+              ownerId: group.created_by,
+              notifyChannels: task.notify_channels,
+              skipStore: true,
+            });
+          } catch (notifyErr) {
+            logger.error(
+              { taskId: task.id, err: notifyErr },
+              'Failed to notify script task result to IM',
+            );
+          }
+        }
+      }
     }
 
     logger.info(
@@ -618,8 +681,6 @@ async function runScriptTask(
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Script task failed');
-  } finally {
-    runningTaskIds.delete(task.id);
   }
 
   const durationMs = Date.now() - startTime;
@@ -638,7 +699,11 @@ async function runScriptTask(
     : result
       ? result.slice(0, 200)
       : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  try {
+    updateTaskAfterRun(task.id, nextRun, resultSummary);
+  } finally {
+    runningTaskIds.delete(task.id);
+  }
 }
 
 /**
@@ -652,6 +717,8 @@ async function runGroupModeTask(
   manualRun = false,
 ): Promise<void> {
   const startTime = Date.now();
+  runningTaskIds.add(task.id);
+  let resultSummary = '已注入到源工作区';
 
   try {
     // Resolve task owner for sender attribution
@@ -687,8 +754,8 @@ async function runGroupModeTask(
       error: null,
     });
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    logger.error({ taskId: task.id, error }, 'Group-mode task injection failed');
+    resultSummary = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    logger.error({ taskId: task.id, error: resultSummary }, 'Group-mode task injection failed');
 
     logTaskRun({
       task_id: task.id,
@@ -696,14 +763,16 @@ async function runGroupModeTask(
       duration_ms: Date.now() - startTime,
       status: 'error',
       result: null,
-      error,
+      error: resultSummary,
     });
+  } finally {
+    try {
+      const nextRun = manualRun ? task.next_run : computeNextRun(task);
+      updateTaskAfterRun(task.id, nextRun, resultSummary);
+    } finally {
+      runningTaskIds.delete(task.id);
+    }
   }
-
-  // Update next_run (manualRun preserves original schedule)
-  const nextRun = manualRun ? task.next_run : computeNextRun(task);
-  const resultSummary = '已注入到源工作区';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
 let schedulerRunning = false;

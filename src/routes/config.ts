@@ -25,6 +25,7 @@ import {
   QQConfigSchema,
   WeChatConfigSchema,
   DingTalkConfigSchema,
+  DiscordConfigSchema,
   RegistrationConfigSchema,
   AppearanceConfigSchema,
   SystemSettingsSchema,
@@ -65,6 +66,7 @@ import {
   getAppearanceConfig,
   saveAppearanceConfig,
   getSystemSettings,
+  getEffectiveExternalDir,
   saveSystemSettings,
   getUserFeishuConfig,
   saveUserFeishuConfig,
@@ -76,9 +78,16 @@ import {
   saveUserWeChatConfig,
   getUserDingTalkConfig,
   saveUserDingTalkConfig,
+  getUserDiscordConfig,
+  saveUserDiscordConfig,
   updateAllSessionCredentials,
 } from '../runtime-config.js';
-import type { ClaudeOAuthCredentials, CachedOAuthUsage, OAuthUsageResponse, OAuthUsageBucket } from '../runtime-config.js';
+import type {
+  ClaudeOAuthCredentials,
+  CachedOAuthUsage,
+  OAuthUsageResponse,
+  OAuthUsageBucket,
+} from '../runtime-config.js';
 import { parseOAuthUsageBucket } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
@@ -89,6 +98,8 @@ import {
   clearBillingEnabledCache,
 } from '../billing.js';
 import { providerPool } from '../provider-pool.js';
+import fs from 'fs';
+import path from 'path';
 
 const configRoutes = new Hono<{ Variables: Variables }>();
 
@@ -98,7 +109,7 @@ const configRoutes = new Hono<{ Variables: Variables }>();
  */
 function countOtherEnabledImChannels(
   userId: string,
-  excludeChannel: 'feishu' | 'telegram' | 'qq' | 'wechat' | 'dingtalk',
+  excludeChannel: 'feishu' | 'telegram' | 'qq' | 'wechat' | 'dingtalk' | 'discord',
 ): number {
   let count = 0;
   if (excludeChannel !== 'feishu' && getUserFeishuConfig(userId)?.enabled)
@@ -109,6 +120,8 @@ function countOtherEnabledImChannels(
     count++;
   if (excludeChannel !== 'qq' && getUserQQConfig(userId)?.enabled) count++;
   if (excludeChannel !== 'dingtalk' && getUserDingTalkConfig(userId)?.enabled)
+    count++;
+  if (excludeChannel !== 'discord' && getUserDiscordConfig(userId)?.enabled)
     count++;
   return count;
 }
@@ -248,7 +261,10 @@ async function fetchOAuthUsage(providerId: string): Promise<CachedOAuthUsage> {
       if (!resp.ok) {
         // Return stale cache if available, otherwise throw
         if (cached) {
-          const stale: CachedOAuthUsage = { ...cached, error: `HTTP ${resp.status}` };
+          const stale: CachedOAuthUsage = {
+            ...cached,
+            error: `HTTP ${resp.status}`,
+          };
           usageCache.set(providerId, stale);
           return stale;
         }
@@ -1278,6 +1294,73 @@ configRoutes.put(
   },
 );
 
+// ─── External Claude resources (admin only) ─────────────────────────
+
+configRoutes.get('/external-resources', authMiddleware, systemConfigMiddleware, (c) => {
+  // 仅 admin 可查看宿主机资源，普通用户不允许看到宿主机任何内容
+  const user = c.get('user') as AuthUser;
+  if (user.role !== 'admin') {
+    return c.json({ dir: '', rules: [], claudeMd: null });
+  }
+  const effectiveDir = getEffectiveExternalDir();
+
+  const result: {
+    dir: string;
+    rules: Array<{ name: string; size: number }>;
+    claudeMd: string | null;
+  } = { dir: effectiveDir, rules: [], claudeMd: null };
+
+  // Rules
+  const rulesDir = path.join(effectiveDir, 'rules');
+  try {
+    if (fs.existsSync(rulesDir)) {
+      for (const entry of fs.readdirSync(rulesDir, { withFileTypes: true })) {
+        if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+        try {
+          const st = fs.statSync(path.join(rulesDir, entry.name));
+          result.rules.push({ name: entry.name, size: st.size });
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* ignore */ }
+
+  // CLAUDE.md
+  const claudeMdPath = path.join(effectiveDir, 'CLAUDE.md');
+  try {
+    if (fs.existsSync(claudeMdPath)) {
+      const content = fs.readFileSync(claudeMdPath, 'utf-8');
+      result.claudeMd = content.length > 10000 ? content.slice(0, 10000) + '\n...(截断)' : content;
+    }
+  } catch { /* ignore */ }
+
+  return c.json(result);
+});
+
+// Read a single rule file content (admin only)
+configRoutes.get('/external-resources/rule', authMiddleware, systemConfigMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  if (user.role !== 'admin') {
+    return c.text('Forbidden', 403);
+  }
+  const name = c.req.query('name');
+  if (!name || name.includes('/') || name.includes('..')) {
+    return c.text('Invalid name', 400);
+  }
+  const effectiveDir = getEffectiveExternalDir();
+  const filePath = path.join(effectiveDir, 'rules', name);
+  try {
+    const resolved = fs.realpathSync(filePath);
+    // 确保解析后的路径仍在 rules 目录内
+    if (!resolved.startsWith(fs.realpathSync(path.join(effectiveDir, 'rules')))) {
+      return c.text('Forbidden', 403);
+    }
+    const content = fs.readFileSync(resolved, 'utf-8');
+    return c.text(content);
+  } catch {
+    return c.text('Not found', 404);
+  }
+});
+
 // ─── Per-user IM connection status ──────────────────────────────────
 
 configRoutes.get('/user-im/status', authMiddleware, (c) => {
@@ -1288,6 +1371,7 @@ configRoutes.get('/user-im/status', authMiddleware, (c) => {
     qq: deps?.isUserQQConnected?.(user.id) ?? false,
     wechat: deps?.isUserWeChatConnected?.(user.id) ?? false,
     dingtalk: deps?.isUserDingTalkConnected?.(user.id) ?? false,
+    discord: deps?.isUserDiscordConnected?.(user.id) ?? false,
   });
 });
 
@@ -1891,6 +1975,7 @@ configRoutes.get('/user-im/dingtalk', authMiddleware, (c) => {
         hasClientSecret: false,
         clientSecretMasked: null,
         enabled: false,
+        streamingMode: 'card',
         updatedAt: null,
         connected,
       });
@@ -1904,6 +1989,7 @@ configRoutes.get('/user-im/dingtalk', authMiddleware, (c) => {
           config.clientSecret.slice(-4)
         : null,
       enabled: config.enabled ?? false,
+      streamingMode: config.streamingMode ?? 'card',
       updatedAt: config.updatedAt,
       connected,
     });
@@ -1944,6 +2030,7 @@ configRoutes.put('/user-im/dingtalk', authMiddleware, async (c) => {
     clientId: current?.clientId || '',
     clientSecret: current?.clientSecret || '',
     enabled: current?.enabled ?? true,
+    streamingMode: current?.streamingMode ?? 'card',
   };
 
   if (typeof validation.data.clientId === 'string') {
@@ -1959,6 +2046,9 @@ configRoutes.put('/user-im/dingtalk', authMiddleware, async (c) => {
     next.enabled = validation.data.enabled;
   } else if (!current && (next.clientId || next.clientSecret)) {
     next.enabled = true;
+  }
+  if (typeof validation.data.streamingMode === 'string') {
+    next.streamingMode = validation.data.streamingMode;
   }
 
   try {
@@ -1981,6 +2071,7 @@ configRoutes.put('/user-im/dingtalk', authMiddleware, async (c) => {
         ? saved.clientSecret.slice(0, 4) + '***' + saved.clientSecret.slice(-4)
         : null,
       enabled: saved.enabled ?? false,
+      streamingMode: saved.streamingMode ?? 'card',
       updatedAt: saved.updatedAt,
       connected,
     });
@@ -2021,6 +2112,171 @@ configRoutes.post('/user-im/dingtalk/test', authMiddleware, async (c) => {
       err instanceof Error ? err.message : 'Connection test failed';
     logger.warn({ err }, 'DingTalk connection test failed');
     return c.json({ error: message }, 400);
+  }
+});
+
+// ─── Per-user Discord IM config ──────────────────────────────────
+
+configRoutes.get('/user-im/discord', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  try {
+    const config = getUserDiscordConfig(user.id);
+    const connected = deps?.isUserDiscordConnected?.(user.id) ?? false;
+    if (!config) {
+      return c.json({
+        hasBotToken: false,
+        botTokenMasked: null,
+        enabled: false,
+        streamingMode: 'off',
+        updatedAt: null,
+        connected,
+      });
+    }
+    return c.json({
+      hasBotToken: !!config.botToken,
+      botTokenMasked: config.botToken
+        ? config.botToken.slice(0, 4) + '***' + config.botToken.slice(-4)
+        : null,
+      enabled: config.enabled ?? false,
+      streamingMode: config.streamingMode ?? 'off',
+      updatedAt: config.updatedAt,
+      connected,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load user Discord config');
+    return c.json({ error: 'Failed to load Discord config' }, 500);
+  }
+});
+
+configRoutes.put('/user-im/discord', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const validation = DiscordConfigSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      { error: 'Invalid request body', details: validation.error.format() },
+      400,
+    );
+  }
+
+  // Billing: check IM channel limit when enabling
+  if (validation.data.enabled === true && isBillingEnabled()) {
+    const current = getUserDiscordConfig(user.id);
+    if (!current?.enabled) {
+      const limit = checkImChannelLimit(
+        user.id,
+        user.role,
+        countOtherEnabledImChannels(user.id, 'discord'),
+      );
+      if (!limit.allowed) {
+        return c.json({ error: limit.reason }, 403);
+      }
+    }
+  }
+
+  const current = getUserDiscordConfig(user.id);
+  const next = {
+    botToken: current?.botToken || '',
+    enabled: current?.enabled ?? true,
+    streamingMode: current?.streamingMode ?? ('off' as const),
+  };
+
+  if (typeof validation.data.botToken === 'string') {
+    const token = validation.data.botToken.trim();
+    if (token) next.botToken = token;
+  } else if (validation.data.clearBotToken === true) {
+    next.botToken = '';
+  }
+  if (typeof validation.data.enabled === 'boolean') {
+    next.enabled = validation.data.enabled;
+  } else if (!current && next.botToken) {
+    next.enabled = true;
+  }
+  if (typeof validation.data.streamingMode === 'string') {
+    next.streamingMode = validation.data.streamingMode;
+  }
+
+  try {
+    const saved = saveUserDiscordConfig(user.id, next);
+
+    // Hot-reload: reconnect user's Discord channel
+    if (deps?.reloadUserIMConfig) {
+      try {
+        await deps.reloadUserIMConfig(user.id, 'discord');
+      } catch (err) {
+        logger.warn({ err, userId: user.id }, 'Failed to hot-reload Discord');
+      }
+    }
+
+    const connected = deps?.isUserDiscordConnected?.(user.id) ?? false;
+    return c.json({
+      hasBotToken: !!saved.botToken,
+      botTokenMasked: saved.botToken
+        ? saved.botToken.slice(0, 4) + '***' + saved.botToken.slice(-4)
+        : null,
+      enabled: saved.enabled ?? false,
+      streamingMode: saved.streamingMode ?? 'off',
+      updatedAt: saved.updatedAt,
+      connected,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Invalid config';
+    logger.warn({ err }, 'Invalid Discord config');
+    return c.json({ error: message }, 400);
+  }
+});
+
+configRoutes.post('/user-im/discord/test', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const config = getUserDiscordConfig(user.id);
+
+  if (!config?.botToken) {
+    return c.json({ error: 'Discord Bot Token not configured' }, 400);
+  }
+
+  let timeoutId: NodeJS.Timeout | undefined;
+  try {
+    // Test by creating a temporary Client and logging in
+    const { Client, GatewayIntentBits } = await import('discord.js');
+    const testClient = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+    const result = await Promise.race([
+      new Promise<{ success: true; bot_username: string; bot_name: string }>(
+        (resolve, reject) => {
+          testClient.once('ready', () => {
+            const username = testClient.user?.username || 'unknown';
+            const name = testClient.user?.displayName || username;
+            testClient.destroy();
+            resolve({ success: true, bot_username: username, bot_name: name });
+          });
+          testClient.once('error', (err) => {
+            testClient.destroy();
+            reject(err);
+          });
+          testClient.login(config.botToken).catch((err) => {
+            testClient.destroy();
+            reject(err);
+          });
+        },
+      ),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          testClient.destroy();
+          reject(new Error('Connection test timed out (10s)'));
+        }, 10000);
+      }),
+    ]);
+
+    return c.json(result);
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'Connection test failed';
+    logger.warn({ err }, 'Discord connection test failed');
+    return c.json({ error: message }, 400);
+  } finally {
+    // Defense-in-depth: clear the race timer in both success and failure paths
+    // so the process doesn't keep an active handle for up to 10s after the test.
+    if (timeoutId) clearTimeout(timeoutId);
   }
 });
 
