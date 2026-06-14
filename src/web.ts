@@ -199,7 +199,10 @@ function releaseTerminalOwnership(ws: WebSocket, groupJid: string): void {
 }
 
 // --- CORS Middleware ---
-const CORS_ALLOWED_ORIGINS = process.env.CORS_ALLOWED_ORIGINS || '';
+// 默认放行所有 origin：自托管场景下 WebSocket upgrade 的 Origin 深度防御
+// 默认关闭（SameSite=Strict cookie 仍是主防御）。如需收紧，在 .env 配置
+// CORS_ALLOWED_ORIGINS 为逗号分隔的精确白名单（如 https://claw.example.com）。
+const CORS_ALLOWED_ORIGINS = process.env.CORS_ALLOWED_ORIGINS || '*';
 const CORS_ALLOW_LOCALHOST = process.env.CORS_ALLOW_LOCALHOST !== 'false'; // default: true
 
 function isAllowedOrigin(origin: string | undefined): string | null {
