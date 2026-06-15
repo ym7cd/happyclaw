@@ -138,9 +138,41 @@ function sanitizeLogs(text: string): string {
     result = result.replaceAll(projectRoot, '<project>');
   }
 
-  // Generic pattern matching any env var name containing sensitive keywords
+  // Mask known credential FORMATS and Authorization schemes BEFORE the generic
+  // keyword pattern below. The generic pattern's keyword list includes
+  // "authorization", so on the standard `Authorization: Bearer <token>` header
+  // it would match `Authorization: Bearer` (its value part `[^\s"',]+` stops at
+  // the space, consuming only the scheme word) and rewrite it to
+  // `Authorization=***`, leaving the real token after the space exposed. Running
+  // the format-specific passes first guarantees the token itself is redacted
+  // regardless of the keyword that precedes it.
+
+  // Authorization scheme values: `Bearer <token>` / `Basic <creds>`.
+  result = result.replace(
+    /\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi,
+    '$1 ***',
+  );
+
+  // Known credential formats with no surrounding keyword (raw tokens dumped in
+  // logs): Anthropic/OpenAI keys, GitHub tokens, JWTs, AWS access key ids.
+  result = result
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, 'sk-***')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, 'gh_***')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, 'eyJ***')
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, 'AKIA***');
+
+  // Generic pattern matching any env var name containing sensitive keywords.
+  // Allow optional quotes and whitespace around the separator so JSON
+  // ("apiKey": "v") and shell (APIKEY=v) forms are both covered. Runs AFTER the
+  // format passes above, so a `Authorization: Bearer <token>` already has its
+  // token masked and this only collapses the leftover `Authorization:` prefix.
+  // The value part excludes comma/quote to avoid over-masking adjacent
+  // non-secret fields (`key=v, region=us` must not swallow `region=us`); a
+  // secret whose own value contains a comma would have its post-comma tail
+  // survive here, but the format passes above already cover the common
+  // credential shapes (Bearer/Basic, sk-/gh_/JWT/AKIA).
   const sensitivePattern =
-    /(\b\w*(?:token|password|passwd|secret|api[_-]?key|auth[_-]?token|authorization|cookie|credential|private[_-]?key|access[_-]?key|app[_-]?secret)\w*)[=:]\s*\S+/gi;
+    /(\b\w*(?:token|password|passwd|secret|api[_-]?key|auth[_-]?token|authorization|cookie|credential|private[_-]?key|access[_-]?key|app[_-]?secret)\w*)["']?\s*[=:]\s*["']?[^\s"',]+/gi;
   result = result.replace(sensitivePattern, '$1=***');
 
   return result;

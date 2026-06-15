@@ -551,6 +551,14 @@ export function createWhatsAppConnection(
     const chatName = groupNameCache.get(remoteJid) || (isGroup ? remoteJid : senderName);
     const timestampISO = new Date(tsMs > 0 ? tsMs : Date.now()).toISOString();
 
+    // Register the chat BEFORE the group gates so shouldProcessGroupMessage /
+    // isGroupOwnerMessage can resolve it. Without this, a group's first message
+    // hits the mention gate while still unregistered → shouldProcessGroupMessage
+    // returns false → the message is dropped (mirrors Discord's early register).
+    storeChatMetadata(chatJid, timestampISO);
+    updateChatName(chatJid, chatName);
+    opts.onNewChat(chatJid, chatName);
+
     // ── Group gates: sender allowlist → mention required → owner check ──
     if (isGroup) {
       if (
@@ -595,30 +603,37 @@ export function createWhatsAppConnection(
       }
     }
 
-    // If no text, try to handle media (image/video/audio/document)
+    // Handle media (image/video/audio/document) whenever the message carries
+    // it — NOT only when there's no text. A captioned image/video has non-empty
+    // `text` (extractMessageText reads the caption), so gating on `!finalContent`
+    // would skip the download entirely (media lost + no Vision inlining).
+    // tryHandleMediaMessage already folds the caption into its returned content.
     let finalContent = text;
     let attachmentsJson: string | undefined;
-    if (!finalContent) {
+    if (detectMedia(content)) {
       const groupFolder = opts.resolveGroupFolder?.(chatJid);
       const media = await tryHandleMediaMessage(
         msg,
         content,
         groupFolder,
       );
-      if (!media) {
+      if (media) {
+        finalContent = media.content;
+        attachmentsJson = media.attachmentsJson;
+      } else if (!finalContent) {
         logger.debug(
           { remoteJid, msgId: key.id, types: Object.keys(content) },
           'WhatsApp message has neither text nor supported media',
         );
         return;
       }
-      finalContent = media.content;
-      attachmentsJson = media.attachmentsJson;
+    } else if (!finalContent) {
+      logger.debug(
+        { remoteJid, msgId: key.id, types: Object.keys(content) },
+        'WhatsApp message has neither text nor supported media',
+      );
+      return;
     }
-
-    storeChatMetadata(chatJid, timestampISO);
-    updateChatName(chatJid, chatName);
-    opts.onNewChat(chatJid, chatName);
 
     // Slash command interception (matches Telegram pattern: `/cmd args`)
     const trimmed = finalContent.trim();
@@ -716,6 +731,7 @@ export function createWhatsAppConnection(
         }
         sock = null;
       }
+      processingLock.dispose();
       setState({ status: 'disconnected' });
     },
 

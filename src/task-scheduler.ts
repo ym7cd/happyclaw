@@ -36,6 +36,7 @@ import {
   updateChatName,
   updateTaskAfterRun,
   updateTaskWorkspace,
+  updateTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
@@ -161,6 +162,34 @@ function ensureTaskWorkspace(
   deps.onWorkspaceCreated?.(jid, folder, name, ownerId);
 
   return { jid, folder };
+}
+
+/**
+ * Compute the queue JID for an isolated (non-group, non-script) task run.
+ * Materializes the workspace BEFORE enqueueing so the queue JID matches the
+ * effectiveJid runTaskInner derives from workspace.jid. Otherwise a first run
+ * (workspace_jid still null) enqueues under `${targetGroupJid}#task:${id}` while
+ * the container registers under `${web:newUuid}#task:${id}` — an orphaned
+ * GroupState that closeStdin/stopGroup can never reach. Shared by the scheduler
+ * loop and triggerTaskNow so both paths derive the JID identically.
+ */
+function computeIsolatedTaskQueueJid(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+  targetGroupJid: string,
+): string {
+  let baseJid = task.workspace_jid;
+  try {
+    baseJid = ensureTaskWorkspace(task, deps).jid;
+  } catch (err) {
+    logger.error(
+      { taskId: task.id, err },
+      'Failed to ensure task workspace before enqueue',
+    );
+  }
+  return baseJid
+    ? `${baseJid}#task:${task.id}`
+    : `${targetGroupJid}#task:${task.id}`;
 }
 
 export interface SchedulerDependencies {
@@ -625,15 +654,28 @@ async function runTaskInner(
         : 'Completed';
     nextRun = safeComputeNextRun(task, options?.manualRun);
     if (!options?.manualRun && nextRun === null && task.schedule_type !== 'once' && !error) {
-      resultSummary = 'Error: failed to compute next_run';
-    }
-    try {
-      updateTaskAfterRun(task.id, nextRun, resultSummary);
-    } catch (err) {
+      // A recurring task that can't compute its next run (bad schedule_value,
+      // transient cron parse failure) must NOT be silently marked completed by
+      // updateTaskAfterRun(null) — that permanently disables it. Pause it so the
+      // owner can fix the schedule, preserving last_run/last_result.
       logger.error(
-        { taskId: task.id, err },
-        'updateTaskAfterRun failed',
+        { taskId: task.id, scheduleType: task.schedule_type, scheduleValue: task.schedule_value },
+        'Recurring task produced null next_run; pausing instead of completing',
       );
+      try {
+        updateTask(task.id, { status: 'paused' });
+      } catch (err) {
+        logger.error({ taskId: task.id, err }, 'Failed to pause task with null next_run');
+      }
+    } else {
+      try {
+        updateTaskAfterRun(task.id, nextRun, resultSummary);
+      } catch (err) {
+        logger.error(
+          { taskId: task.id, err },
+          'updateTaskAfterRun failed',
+        );
+      }
     }
   } finally {
     runningTaskIds.delete(task.id);
@@ -1160,10 +1202,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             );
           });
         } else {
-          // Isolated mode (default): each agent task has a dedicated workspace
-          const taskQueueJid = currentTask.workspace_jid
-            ? `${currentTask.workspace_jid}#task:${currentTask.id}`
-            : `${targetGroupJid}#task:${currentTask.id}`;
+          // Isolated mode (default): each agent task has a dedicated workspace.
+          const taskQueueJid = computeIsolatedTaskQueueJid(
+            currentTask,
+            deps,
+            targetGroupJid,
+          );
           deps.queue.enqueueTask(taskQueueJid, currentTask.id, () =>
             runTask(currentTask, deps, {
               taskRunId: currentTask.id,
@@ -1215,9 +1259,7 @@ export function triggerTaskNow(
     );
   } else {
     const opts: RunTaskOptions = { manualRun: true, taskRunId: task.id };
-    const taskQueueJid = task.workspace_jid
-      ? `${task.workspace_jid}#task:${task.id}`
-      : `${targetGroupJid}#task:${task.id}`;
+    const taskQueueJid = computeIsolatedTaskQueueJid(task, deps, targetGroupJid);
     deps.queue.enqueueTask(taskQueueJid, task.id, () =>
       runTask(task, deps, opts),
     );

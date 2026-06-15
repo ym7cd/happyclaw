@@ -789,19 +789,24 @@ authRoutes.post('/avatar', authMiddleware, async (c) => {
 
   fs.mkdirSync(AVATARS_DIR, { recursive: true });
 
-  // Delete old avatar files for this user
-  try {
-    const existing = fs
-      .readdirSync(AVATARS_DIR)
-      .filter((f) => f.startsWith(`${user.id}-`));
-    for (const f of existing) {
-      fs.unlinkSync(path.join(AVATARS_DIR, f));
-    }
-  } catch {
-    /* ignore */
-  }
+  // user vs AI avatar are stored separately; use distinct filename prefixes so
+  // uploading one doesn't delete the other (which left the other field's
+  // DB url dangling → 404).
+  const target = c.req.query('target');
+  const field = target === 'user' ? 'avatar_url' : 'ai_avatar_url';
+  const prefix = target === 'user' ? `${user.id}-user-` : `${user.id}-ai-`;
 
-  const filename = `${user.id}-${crypto.randomBytes(4).toString('hex')}${ext}`;
+  // The file the OTHER avatar field currently points at must be preserved when
+  // we reap stale files below — uploading the user avatar must not delete the
+  // AI avatar, and vice-versa.
+  const current = getUserById(user.id);
+  const otherUrl =
+    target === 'user' ? current?.ai_avatar_url : current?.avatar_url;
+  const otherFilename = otherUrl
+    ? otherUrl.replace(/^\/api\/auth\/avatars\//, '')
+    : null;
+
+  const filename = `${prefix}${crypto.randomBytes(4).toString('hex')}${ext}`;
   const filePath = path.join(AVATARS_DIR, filename);
   const buffer = Buffer.from(await file.arrayBuffer());
   const tmpPath = filePath + '.tmp';
@@ -810,9 +815,25 @@ authRoutes.post('/avatar', authMiddleware, async (c) => {
 
   const avatarUrl = `/api/auth/avatars/${filename}`;
 
-  // Update user profile — target=user stores as avatar_url, otherwise ai_avatar_url
-  const target = c.req.query('target');
-  const field = target === 'user' ? 'avatar_url' : 'ai_avatar_url';
+  // Reap this user's stale avatar files: everything prefixed with the user id
+  // EXCEPT the file we just wrote and the one the other avatar field still
+  // references. This both replaces the previous same-target avatar and reaps
+  // legacy `${user.id}-{hex}` files (uploaded before the user-/ai- split) once
+  // they are unreferenced — without ever deleting the other target's in-use
+  // avatar.
+  try {
+    const keep = new Set(
+      [filename, otherFilename].filter((x): x is string => !!x),
+    );
+    for (const f of fs.readdirSync(AVATARS_DIR)) {
+      if (f.startsWith(`${user.id}-`) && !keep.has(f)) {
+        fs.unlinkSync(path.join(AVATARS_DIR, f));
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
   updateUserFields(user.id, { [field]: avatarUrl });
 
   const updated = getUserById(user.id)!;
