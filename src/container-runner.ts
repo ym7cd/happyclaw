@@ -1499,6 +1499,9 @@ export async function runHostAgent(
       containerOverride,
       hostPoolResult?.resolved.customEnv,
     );
+    const injectsAnthropicAuthToken = envLines.some((line) =>
+      line.startsWith('ANTHROPIC_AUTH_TOKEN='),
+    );
     for (const line of envLines) {
       const eqIdx = line.indexOf('=');
       if (eqIdx > 0) {
@@ -1506,12 +1509,13 @@ export async function runHostAgent(
       }
     }
 
-    // Third-party provider: ANTHROPIC_AUTH_TOKEN inherited from the host
-    // (~/.claude/settings.json) forces the SDK down the OAuth code path,
-    // which skips the standard Bearer header and causes 404 on non-Anthropic
-    // endpoints. Unset it so the injected ANTHROPIC_API_KEY takes effect.
+    // Third-party provider: unless this provider explicitly injects
+    // ANTHROPIC_AUTH_TOKEN (Bearer proxy mode), remove any inherited host token
+    // so API-key mode can take effect.
     if (hostEnv['ANTHROPIC_BASE_URL']) {
-      delete hostEnv['ANTHROPIC_AUTH_TOKEN'];
+      if (!injectsAnthropicAuthToken) {
+        delete hostEnv['ANTHROPIC_AUTH_TOKEN'];
+      }
 
       // Also strip oauthAccount from session .claude.json: the SDK detects
       // OAuth credentials in .claude.json and takes the OAuth code path even

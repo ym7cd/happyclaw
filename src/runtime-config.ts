@@ -423,10 +423,15 @@ function normalizeSecret(input: unknown, fieldName: string): string {
   if (typeof input !== 'string') {
     throw new Error(`Invalid field: ${fieldName}`);
   }
-  // Strip ALL whitespace and non-ASCII characters — API keys/tokens are always ASCII;
-  // users often paste with accidental spaces, line breaks, or smart quotes (e.g. U+2019).
   // eslint-disable-next-line no-control-regex
-  const value = input.replace(/\s+/g, '').replace(/[^\x00-\x7F]/g, '');
+  const ascii = input.replace(/[^\x00-\x7F]/g, '').trim();
+  // ANTHROPIC_AUTH_TOKEN may intentionally be an Authorization header value
+  // such as "Bearer <token>"; preserve that separator while still normalizing
+  // accidental whitespace. API keys and OAuth tokens stay compact.
+  const value =
+    fieldName === 'anthropicAuthToken'
+      ? ascii.replace(/\s+/g, ' ')
+      : ascii.replace(/\s+/g, '');
   if (value.length > MAX_FIELD_LENGTH) {
     throw new Error(`Field too long: ${fieldName}`);
   }
@@ -547,7 +552,8 @@ function sanitizeCustomEnvMap(
     if (options?.skipReservedClaudeKeys && RESERVED_CLAUDE_ENV_KEYS.has(key)) {
       continue;
     }
-    out[key] = sanitizeEnvValue(
+    out[key] = sanitizeCustomEnvValue(
+      key,
       typeof rawValue === 'string' ? rawValue : String(rawValue),
     );
   }
@@ -2323,6 +2329,13 @@ function sanitizeEnvValue(value: string): string {
   return value.replace(/[\r\n\0]/g, '');
 }
 
+function sanitizeCustomEnvValue(key: string, value: string): string {
+  if (key === 'ANTHROPIC_CUSTOM_HEADERS') {
+    return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\0/g, '');
+  }
+  return sanitizeEnvValue(value);
+}
+
 /** Convert KEY=value lines to shell-safe format by single-quoting values.
  *  Used when writing env files that are `source`d by bash. */
 export function shellQuoteEnvLines(lines: string[]): string[] {
@@ -2359,11 +2372,13 @@ export function buildClaudeEnvLines(
     );
   }
   if (config.anthropicAuthToken) {
-    if (config.anthropicBaseUrl) {
-      // Third-party provider: the SDK treats ANTHROPIC_AUTH_TOKEN as an OAuth
-      // legacy token and skips the standard Bearer header, causing 404 on
-      // non-Anthropic endpoints. Use ANTHROPIC_API_KEY instead so the SDK
-      // sends the correct Authorization header.
+    if (
+      config.anthropicBaseUrl &&
+      !/^Bearer\s+/i.test(config.anthropicAuthToken)
+    ) {
+      // Most third-party Anthropic-compatible endpoints expect API-key style
+      // auth. Explicit Bearer tokens are different: embedded-path proxies rely
+      // on ANTHROPIC_AUTH_TOKEN to produce Authorization: Bearer <value>.
       lines.push(
         `ANTHROPIC_API_KEY=${sanitizeEnvValue(config.anthropicAuthToken)}`,
       );
@@ -2381,7 +2396,7 @@ export function buildClaudeEnvLines(
   const customEnv = profileCustomEnv ?? getActiveProfileCustomEnv();
   for (const [key, value] of Object.entries(customEnv)) {
     if (RESERVED_CLAUDE_ENV_KEYS.has(key)) continue;
-    lines.push(`${key}=${sanitizeEnvValue(value)}`);
+    lines.push(`${key}=${sanitizeCustomEnvValue(key, value)}`);
   }
 
   return lines;
@@ -2803,7 +2818,7 @@ export function buildContainerEnvLines(
         continue;
       }
       // Strip control characters to prevent env injection
-      const sanitized = value.replace(/[\r\n\0]/g, '');
+      const sanitized = sanitizeCustomEnvValue(key, value);
       lines.push(`${key}=${sanitized}`);
     }
   }
