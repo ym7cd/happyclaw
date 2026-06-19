@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { describe, expect, test } from 'vitest';
 
 import { sanitizeLogs } from '../src/routes/bug-report.js';
@@ -61,6 +62,30 @@ describe('sanitizeLogs — multi-line safety', () => {
     // independently — no cross-line over-masking, no leak.
     expect(out).not.toContain('realvalue123');
     expect(out).toContain('host=prod region=us');
+  });
+});
+
+describe('sanitizeLogs — absolute path redaction', () => {
+  // Use os.homedir() (a leaf path) rather than the project root: depending on
+  // the cwd/home layout the home string can be a substring of the project root,
+  // which complicates the placeholder. The home path redacts cleanly either way.
+  test('replaces an absolute home path with a placeholder', () => {
+    const out = sanitizeLogs(os.homedir() + '/some/file.ts');
+    expect(out).toContain('<home>');
+    expect(out).not.toContain(os.homedir());
+  });
+
+  test('redacts a path even when the line straddles the truncation cap', () => {
+    // Path redaction runs BEFORE the per-line truncation, so a path crossing the
+    // 2000-char cut point is replaced (→ <home>) rather than sliced mid-string
+    // and left as a leaked raw fragment. A regression that truncates first would
+    // slice the home path before replaceAll could match it, dropping the <home>
+    // placeholder — which this test catches.
+    const home = os.homedir();
+    const line = 'x'.repeat(1990) + home + '/secret-file.ts';
+    const out = sanitizeLogs(line);
+    expect(out).toContain('<home>');
+    expect(out).not.toContain(home);
   });
 });
 
