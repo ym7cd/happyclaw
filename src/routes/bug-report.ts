@@ -124,7 +124,20 @@ function readRecentLogs(folder: string, maxLines = 50): string {
 
 /** Mask environment variable values in log text */
 function sanitizeLogs(text: string): string {
-  let result = text;
+  // Cap per-line length BEFORE the keyword regex runs. The credential pattern's
+  // prefix `\b\w*(?:keyword)\w*` backtracks O(n²) on a long separator-less,
+  // keyword-dense line (e.g. a member-influenced agent stdout dump written
+  // untruncated on a failing run); a ~100KB line stalls the single-threaded
+  // event loop for ~1-2s. Bug reports never need multi-KB single lines, so a
+  // per-line cap keeps masking linear. Splitting per line also stops an
+  // unterminated quote in one line from over-masking the lines that follow it.
+  const MAX_LINE = 2000;
+  let result = text
+    .split('\n')
+    .map((line) =>
+      line.length > MAX_LINE ? line.slice(0, MAX_LINE) + '…[truncated]' : line,
+    )
+    .join('\n');
 
   // Replace absolute paths to project root and home directory with placeholders
   const projectRoot = path.resolve(process.cwd());
@@ -167,15 +180,17 @@ function sanitizeLogs(text: string): string {
   // format passes above, so a `Authorization: Bearer <token>` already has its
   // token masked and this only collapses the leftover `Authorization:` prefix.
   // The value part matches, in order: a double/single-quoted string with an
-  // OPTIONAL closing quote (`"[^"]*"?`) — so a mid-line-truncated log such as
+  // OPTIONAL closing quote (`"[^"\n]*"?`) — so a mid-line-truncated log such as
   // `"app_secret": "cli_abc` (readRecentLogs slices the buffer and routinely
   // cuts inside a quoted value) is still masked whole, and JSON values
   // containing commas are masked without leaking neighbours; OR an unquoted run
   // `[^\s"']+` that keeps comma-joined segments (`cookie=a,b,c` → `cookie=***`,
   // including a leading comma) but stops at whitespace so a space-separated
-  // neighbour like `apikey=v, region=us` keeps `region=us`.
+  // neighbour like `apikey=v, region=us` keeps `region=us`. The quoted classes
+  // exclude `\n` so an unterminated quote over-masks only the rest of its OWN
+  // line, never swallowing following log lines.
   const sensitivePattern =
-    /(\b\w*(?:token|password|passwd|secret|api[_-]?key|auth[_-]?token|authorization|cookie|credential|private[_-]?key|access[_-]?key|app[_-]?secret)\w*)["']?\s*[=:]\s*(?:"[^"]*"?|'[^']*'?|[^\s"']+)/gi;
+    /(\b\w*(?:token|password|passwd|secret|api[_-]?key|auth[_-]?token|authorization|cookie|credential|private[_-]?key|access[_-]?key|app[_-]?secret)\w*)["']?\s*[=:]\s*(?:"[^"\n]*"?|'[^'\n]*'?|[^\s"']+)/gi;
   result = result.replace(sensitivePattern, '$1=***');
 
   return result;

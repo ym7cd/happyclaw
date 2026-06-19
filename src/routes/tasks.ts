@@ -326,10 +326,19 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
   const scheduleChanged =
     patchData.schedule_type !== undefined ||
     patchData.schedule_value !== undefined;
+  // Only recompute on resume for a RECURRING task whose next_run was cleared and
+  // when the caller didn't supply an explicit next_run:
+  //  - exclude 'once' so a completed once-task (status='completed', next_run=NULL,
+  //    schedule_value = its original PAST timestamp) can't be resurrected and
+  //    immediately re-fired by a bare {status:'active'} PATCH;
+  //  - honor a caller-supplied next_run instead of recomputing (and 400-ing) from
+  //    a possibly-corrupt schedule_value.
   const resumingWithoutNextRun =
     patchData.status === 'active' &&
     existing.status !== 'active' &&
-    existing.next_run == null;
+    existing.next_run == null &&
+    existing.schedule_type !== 'once' &&
+    patchData.next_run === undefined;
   if (scheduleChanged || resumingWithoutNextRun) {
     const schedType = patchData.schedule_type ?? existing.schedule_type;
     const schedValue = patchData.schedule_value ?? existing.schedule_value;
