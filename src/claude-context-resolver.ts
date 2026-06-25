@@ -13,6 +13,9 @@ export interface ClaudeContextPlanArgs {
   dataDir: string;
   groupSessionsDir?: string;
   mountUserSkills?: boolean;
+  // host 模式下 HappyClaw 记忆层是否启用（即 !disableMemoryLayerForAdminHost）。
+  // true 且 admin 原生 ~/.claude/CLAUDE.md 存在时，两套全局记忆并存，触发 audit 告警。
+  happyclawMemoryActive?: boolean;
 }
 
 export interface ClaudeContextPlan {
@@ -37,6 +40,16 @@ const ADMIN_HOME_FOLDER = 'main';
 
 function exists(p: string | undefined): p is string {
   return !!p && fs.existsSync(p);
+}
+
+// 检测链接/文件本身是否已存在（不跟随 symlink），用于多来源合并时的同名冲突检测。
+function lexists(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function countChildDirs(dir: string | undefined): number {
@@ -83,11 +96,14 @@ function linkEntries(
   sourceDir: string | undefined,
   targetDir: string,
   include: (entry: fs.Dirent) => boolean,
+  onConflict?: (name: string) => void,
 ): void {
   if (!exists(sourceDir)) return;
   for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
     if (!include(entry)) continue;
     const linkPath = path.join(targetDir, entry.name);
+    // 多来源合并进同一目录时，后序来源同名会覆盖前序；记录冲突供 audit 告警。
+    if (onConflict && lexists(linkPath)) onConflict(entry.name);
     removePath(linkPath);
     try {
       fs.symlinkSync(path.join(sourceDir, entry.name), linkPath);
@@ -129,6 +145,12 @@ export function buildClaudeContextPlan(args: ClaudeContextPlanArgs): ClaudeConte
   if (isAdminOwned && !exists(claudeMdSource)) warnings.push('CLAUDE.md missing');
   if (isAdminOwned && !exists(rulesSourceDir)) warnings.push('rules missing');
   if (isAdminOwned && !exists(externalSkillsDir)) warnings.push('external skills missing');
+  // 记忆层未禁用 + 原生 ~/.claude/CLAUDE.md 存在 → 两套全局记忆并存，提醒 admin。
+  if (isAdminOwned && args.happyclawMemoryActive && exists(claudeMdSource)) {
+    warnings.push(
+      '两套全局记忆同时生效：~/.claude/CLAUDE.md（原生 Playbook）+ HappyClaw 记忆层；如需纯原生体验可开启 disableMemoryLayerForAdminHost',
+    );
+  }
 
   const audit: ClaudeContextAudit = {
     executionMode: args.executionMode,
@@ -224,10 +246,17 @@ export function syncHostClaudeContext(
     }
   }
   const includeSkill = (entry: fs.Dirent) => entry.isDirectory() || entry.isSymbolicLink();
-  linkEntries(plan.builtinSkillsDir, skillsDir, includeSkill);
-  linkEntries(plan.externalSkillsDir, skillsDir, includeSkill);
-  linkEntries(plan.projectSkillsDir, skillsDir, includeSkill);
-  linkEntries(plan.userSkillsDir, skillsDir, includeSkill);
+  // skill 四来源（builtin→external→project→user）合并进同一目录，后序覆盖前序。
+  // 收集同名冲突并写入 warnings，避免静默覆盖（前端 AgentContextPanel 会展示）。
+  const skillConflicts = new Set<string>();
+  const onSkillConflict = (name: string) => skillConflicts.add(name);
+  linkEntries(plan.builtinSkillsDir, skillsDir, includeSkill, onSkillConflict);
+  linkEntries(plan.externalSkillsDir, skillsDir, includeSkill, onSkillConflict);
+  linkEntries(plan.projectSkillsDir, skillsDir, includeSkill, onSkillConflict);
+  linkEntries(plan.userSkillsDir, skillsDir, includeSkill, onSkillConflict);
+  for (const name of skillConflicts) {
+    warnings.push(`skill name conflict: ${name}（后序来源覆盖前序）`);
+  }
 
   const rulesDir = path.join(groupSessionsDir, 'rules');
   fs.mkdirSync(rulesDir, { recursive: true });

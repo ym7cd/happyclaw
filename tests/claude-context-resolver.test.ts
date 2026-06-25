@@ -137,4 +137,54 @@ describe('ClaudeContextResolver', () => {
     expect(userPlan.audit.rules.status).toBe('unavailable');
     expect(userPlan.audit.skills.sources.some((source) => source.name === 'external')).toBe(false);
   });
+
+  test('host sync reports skill name conflict across sources', () => {
+    const external = path.join(tmp, 'external-claude');
+    const dataDir = path.join(tmp, 'data');
+    const projectRoot = path.join(tmp, 'project');
+    const sessionDir = path.join(tmp, 'sessions', 'main', '.claude');
+
+    writeFile(path.join(external, 'CLAUDE.md'), '# admin');
+    // builtin 与 external 都有同名 skill，合并时应记录冲突。
+    makeSkill(path.join(dataDir, 'builtin-skills'), 'dup-skill');
+    makeSkill(path.join(external, 'skills'), 'dup-skill');
+
+    const plan = buildClaudeContextPlan({
+      executionMode: 'host',
+      group: fakeGroup('main', 'admin', true) as any,
+      ownerHomeFolder: 'main',
+      externalClaudeDir: external,
+      projectRoot,
+      dataDir,
+      groupSessionsDir: sessionDir,
+    });
+    const sync = syncHostClaudeContext(plan, sessionDir);
+
+    expect(sync.warnings.some((w) => w.includes('skill name conflict: dup-skill'))).toBe(true);
+    // 后序来源（external）覆盖前序（builtin）
+    expect(fs.readlinkSync(path.join(sessionDir, 'skills', 'dup-skill'))).toBe(
+      path.join(external, 'skills', 'dup-skill'),
+    );
+  });
+
+  test('plan warns when native CLAUDE.md and HappyClaw memory layer are both active', () => {
+    const external = path.join(tmp, 'external-claude');
+    writeFile(path.join(external, 'CLAUDE.md'), '# admin playbook');
+
+    const base = {
+      executionMode: 'host' as const,
+      group: fakeGroup('main', 'admin', true) as any,
+      ownerHomeFolder: 'main',
+      externalClaudeDir: external,
+      projectRoot: path.join(tmp, 'project'),
+      dataDir: path.join(tmp, 'data'),
+      groupSessionsDir: path.join(tmp, 'sessions', 'main', '.claude'),
+    };
+
+    const active = buildClaudeContextPlan({ ...base, happyclawMemoryActive: true });
+    expect(active.audit.warnings.some((w) => w.includes('两套全局记忆'))).toBe(true);
+
+    const disabled = buildClaudeContextPlan({ ...base, happyclawMemoryActive: false });
+    expect(disabled.audit.warnings.some((w) => w.includes('两套全局记忆'))).toBe(false);
+  });
 });

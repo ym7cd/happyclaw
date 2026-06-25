@@ -134,6 +134,11 @@ const MEMORY_SYSTEM_GUEST = loadPrompt('memory-system.guest.md');
 const GUIDELINES_BLOCK = `<guidelines>\n${OUTPUT_GUIDELINES}\n${WEB_FETCH_GUIDELINES}\n${BACKGROUND_TASK_GUIDELINES}\n</guidelines>`;
 const CONVERSATION_AGENT_BLOCK = `<agent-override>\n${CONVERSATION_AGENT_GUIDELINES}\n</agent-override>`;
 
+// 各渠道共用的格式说明：Web 端始终可看完整渲染，不因来源降级输出。
+// Mermaid 渲染说明已在 output.md（<guidelines>）讲过，此处不重复，channels/*.md 只写各自差异。
+const CHANNEL_FORMAT_COMMON =
+  '用户同时可以在 Web 端查看你的回复，Web 端支持完整 Markdown 渲染，因此不要因为消息来源限制输出格式。';
+
 interface PromptPiece {
   name: string;
   text: string;
@@ -1288,7 +1293,7 @@ async function runQuery(
       : []),
     { name: 'guidelines', text: GUIDELINES_BLOCK },
     ...(channelGuidelines
-      ? [{ name: `channels/${channel}.md`, text: `<channel-format>\n${channelGuidelines}\n</channel-format>` }]
+      ? [{ name: `channels/${channel}.md`, text: `<channel-format>\n${channelGuidelines}\n${CHANNEL_FORMAT_COMMON}\n</channel-format>` }]
       : []),
     ...(containerInput.agentId
       ? [{ name: 'agent-override.md', text: CONVERSATION_AGENT_BLOCK }]

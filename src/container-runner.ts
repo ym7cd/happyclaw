@@ -1279,6 +1279,22 @@ export function killProcessTree(
 }
 
 /**
+ * admin 主容器（is_home=1, folder=main）+ 系统设置 disableMemoryLayerForAdminHost 开启时，
+ * HappyClaw 记忆层被禁用，agent 完全按本机 ~/.claude/ Playbook 运行。
+ * 供 host 启动路径多处复用，保证判断口径一致。
+ */
+function isAdminHomeMemoryDisabled(
+  ownerHomeFolder: string | undefined,
+  group: RegisteredGroup,
+): boolean {
+  return (
+    ownerHomeFolder === 'main' &&
+    !!group.is_home &&
+    getSystemSettings().disableMemoryLayerForAdminHost
+  );
+}
+
+/**
  * Run agent directly on the host machine (no Docker container).
  * Used for host execution mode — the agent gets full access to the host filesystem.
  */
@@ -1433,6 +1449,8 @@ export async function runHostAgent(
   ensureSettingsJson(settingsFile, hostMcpServers);
 
   // 4. Skills / Rules / CLAUDE.md 自动链接到 session 目录
+  // happyclawMemoryActive：记忆层未禁用 + admin 原生 ~/.claude/CLAUDE.md 并存时触发 audit 告警。
+  // 与下方 disableMemoryLayer 同源（共用 isAdminHomeMemoryDisabled），口径保持一致。
   const hostClaudeContextPlan = buildClaudeContextPlan({
     executionMode: 'host',
     group,
@@ -1441,6 +1459,7 @@ export async function runHostAgent(
     projectRoot: process.cwd(),
     dataDir: DATA_DIR,
     groupSessionsDir,
+    happyclawMemoryActive: !isAdminHomeMemoryDisabled(ownerHomeFolder, group),
   });
   const hostClaudeContextSync = syncHostClaudeContext(
     hostClaudeContextPlan,
@@ -1574,15 +1593,10 @@ export async function runHostAgent(
       hostEnv['SUBAGENT_MODEL'] = hostSysSettings.subagentModel;
     }
 
-    // admin 主容器 + 系统设置 disableMemoryLayerForAdminHost 时禁用 HappyClaw 记忆层：
-    // 不注入 memory MCP 工具 / WORKSPACE_GLOBAL/MEMORY env / 记忆提示，
+    // 禁用 HappyClaw 记忆层：不注入 memory MCP 工具 / WORKSPACE_GLOBAL/MEMORY env / 记忆提示，
     // 三件套仍通过同步后的 session .claude 生效，避免 externalClaudeDir 漂移。
     // 仅作用于 admin 主容器（is_home=1, folder=main），不影响 admin 创建的其他子群组。
-    const isCreatorAdmin = ownerHomeFolder === 'main';
-    const disableMemoryLayer =
-      isCreatorAdmin &&
-      !!group.is_home &&
-      getSystemSettings().disableMemoryLayerForAdminHost;
+    const disableMemoryLayer = isAdminHomeMemoryDisabled(ownerHomeFolder, group);
 
     // 路径映射
     hostEnv['HAPPYCLAW_WORKSPACE_GROUP'] = groupDir;
