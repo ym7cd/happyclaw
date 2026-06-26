@@ -18,19 +18,22 @@ try {
 // "message":"Request not allowed"} 拒绝。这里在最早时机设置一次全局 dispatcher，
 // EnvHttpProxyAgent 会读取 HTTP_PROXY/HTTPS_PROXY 并遵守 NO_PROXY（localhost 等不走代理）。
 // 仅当配置了代理时启用，未配置则保持默认行为（no-op）。失败不阻断启动。
+// 仅检 HTTP(S)_PROXY：EnvHttpProxyAgent 只读 HTTP_PROXY/HTTPS_PROXY（及 NO_PROXY），
+// 不读 ALL_PROXY，且 undici 不支持 SOCKS。若把 ALL_PROXY 纳入守卫，仅配 ALL_PROXY 的
+// 用户会构造出不做任何代理的 no-op agent，却打印「已启用代理」造成误导排障。
 const proxy =
   process.env.HTTPS_PROXY ||
   process.env.https_proxy ||
   process.env.HTTP_PROXY ||
-  process.env.http_proxy ||
-  process.env.ALL_PROXY ||
-  process.env.all_proxy;
+  process.env.http_proxy;
 if (proxy) {
   try {
     setGlobalDispatcher(new EnvHttpProxyAgent());
     // logger 尚未初始化（本模块是最早的 import），用 console 输出一行启动提示。
+    // 对代理串脱敏：去掉 userinfo（http://user:pass@host → http://***@host），避免凭据进日志。
+    const safeProxy = proxy.replace(/\/\/[^/@]*@/, '//***@');
     console.log(
-      `[load-env] 全局 fetch 已启用代理: ${proxy}（NO_PROXY=${process.env.NO_PROXY || process.env.no_proxy || '(默认)'}）`,
+      `[load-env] 全局 fetch 已启用代理: ${safeProxy}（NO_PROXY=${process.env.NO_PROXY || process.env.no_proxy || '(默认)'}）`,
     );
   } catch (err) {
     console.warn(
