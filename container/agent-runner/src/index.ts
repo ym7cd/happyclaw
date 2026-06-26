@@ -16,6 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { createRequire } from 'module';
 import { query, HookCallback, PreCompactHookInput, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
@@ -112,8 +113,12 @@ const IMAGE_MAX_DIMENSION = 8000; // Anthropic API 限制
 // ── 系统提示词从独立 Markdown 文件加载（启动期一次性 readFileSync 缓存到模块级常量）──
 // 文件位于 container/agent-runner/prompts/，便于改提示词无需重编译 + CR 友好。
 
+// 用 fileURLToPath 而非 new URL(...).pathname：后者在 Windows host 模式上返回
+// "/E:/.../index.js"（带前导斜杠 + 盘符），path.join 后会丢盘符变成 "\E:\..."，
+// 再被 Node 按当前盘根解析成 "E:\E:\..." 导致 ENOENT。fileURLToPath 在
+// Linux 容器与 Windows host 模式下都返回正确的本地路径。
 const PROMPTS_DIR = path.join(
-  path.dirname(new URL(import.meta.url).pathname),
+  path.dirname(fileURLToPath(import.meta.url)),
   '..',
   'prompts',
 );
