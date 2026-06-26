@@ -1363,12 +1363,14 @@ async function runQuery(
   }
 
   // Resolve the actual claude CLI path for the SDK.
-  // SDK 的 optionalDependencies（@anthropic-ai/claude-agent-sdk-linux-x64 等）在 npm 上是空包，
-  // 当 pathToClaudeCodeExecutable 留空时 SDK 会去找这些空包里的 native binary 而失败
-  // （Windows 宿主机模式下报 "Claude Code native binary not found at .../claude-agent-sdk-win32-x64/claude"）。
-  // 优先解析本地依赖 @anthropic-ai/claude-code 里 postinstall 落地的真实跨平台 binary，
-  // 它在 Windows / macOS / Linux 上一致存在，且不依赖 PATH 上是否有可用的 claude。
-  let pathToClaudeCodeExecutable: string | undefined = resolveBundledClaudeCli();
+  // SDK 的 optionalDependencies（@anthropic-ai/claude-agent-sdk-{platform} 等）不保证被安装，
+  // pathToClaudeCodeExecutable 留空、且 SDK 自带平台包缺失时会报
+  // "Claude Code native binary not found at .../claude-agent-sdk-win32-x64/claude"（Windows 宿主机模式）。
+  // 仅在 Windows 上优先解析本地依赖 @anthropic-ai/claude-code 里 postinstall 落地的真实 binary
+  // （Windows 没有 which、SDK 平台包又常缺失，故需此兜底）；Linux 容器 / macOS 宿主机
+  // 保持原有 which 解析逻辑不变，避免改变既有 claude 解析来源。
+  let pathToClaudeCodeExecutable: string | undefined =
+    process.platform === 'win32' ? resolveBundledClaudeCli() : undefined;
   if (!pathToClaudeCodeExecutable) {
     try {
       // `which` 在 Windows 上不存在，改用 `where`；其多行输出取第一行。
