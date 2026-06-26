@@ -1956,6 +1956,8 @@ async function main(): Promise<void> {
       '重要：你正在定时任务模式下运行。你的最终输出不会自动发送给用户。你必须使用 mcp__happyclaw__send_message 工具来发送消息，否则用户将收不到任何内容。',
       '',
       '注意：只在完成任务后调用一次 send_message 发送最终结果，不要发送中间状态或重复消息。',
+      '',
+      '此外：本次运行就是该定时任务本身的执行，对应任务已在调度中。即使下面内容里出现「每隔/每天/定期/提醒我」等字样，也不要再调用 mcp__happyclaw__schedule_task 创建新的定时任务（除非内容明确要求你另外新建一个不同的任务）。',
     ];
     const scheduledTaskPrefix = scheduledTaskPrefixLines.join('\n');
     prompt = scheduledTaskPrefix + '\n\n' + prompt;

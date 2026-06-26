@@ -999,6 +999,18 @@ async function runScriptTaskInner(
 }
 
 /**
+ * group 模式定时任务触发时，task.prompt 会作为一条普通用户消息回放进工作区。给它前置
+ * 这段框定，明确「这是已有定时任务到点自动执行、不是用户新指令，不要再 schedule_task」，
+ * 否则当 prompt 含「每隔/每天/提醒」等措辞时，agent 会按 CLAUDE.md 的定时任务规则再建一个
+ * 任务而递归增殖（#564）。标记串 [定时任务自动触发] 与 global CLAUDE.md 的兜底 guard 一致。
+ */
+const SCHEDULED_GROUP_TRIGGER_FRAMING = [
+  '[定时任务自动触发] 以下内容是你此前创建的定时任务到点自动执行的触发，不是用户新发来的指令。',
+  '请直接执行该任务对应的动作。',
+  '重要：这条只是触发信号，对应的定时任务已在调度中。即使下面内容里出现「每隔/每天/定期/提醒我」等字样，也不要再调用 schedule_task 创建或重复该定时任务（除非内容明确要求你另外新建一个不同的任务）。',
+].join('\n');
+
+/**
  * Group context mode: inject task prompt as a regular message into the source workspace.
  * The message is processed by the existing message pipeline (IPC if running, new container if idle).
  */
@@ -1021,12 +1033,13 @@ async function runGroupModeTask(
       throw new Error('storePromptMessage dependency not available');
     }
 
-    // Store prompt as a user message in the source workspace chat
+    // Store prompt as a user message in the source workspace chat.
+    // 前置触发框定，避免被当成用户新指令而递归创建任务（#564）。
     deps.storePromptMessage(
       targetGroupJid,
       owner?.id || 'system',
       senderName,
-      task.prompt,
+      `${SCHEDULED_GROUP_TRIGGER_FRAMING}\n\n${task.prompt}`,
       task.id,
     );
 

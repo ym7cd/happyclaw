@@ -468,7 +468,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
           .optional()
           .default('')
           .describe(
-            'What the agent should do (agent mode) or task description (script mode, optional).',
+            'The action to perform on EACH run (agent mode), or task description (script mode). The repeat cadence is expressed by schedule_type/schedule_value — do NOT put scheduling words like "每隔N/每天/定期/提醒我/every N" into the prompt. This prompt is replayed verbatim to the agent on every trigger to execute, so write it as a direct imperative action, not as a request to schedule something.',
           ),
         schedule_type: z
           .enum(['cron', 'interval', 'once'])
