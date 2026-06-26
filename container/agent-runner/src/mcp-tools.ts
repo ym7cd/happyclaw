@@ -14,6 +14,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import { formatIsoLocal } from './utils.js';
 
 /** Context required by MCP tools. Passed at construction time. */
 export interface McpContext {
@@ -674,7 +675,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
           const formatted = tasks
             .map(
               (t) =>
-                `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
+                `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${formatIsoLocal(t.next_run)}`,
             )
             .join('\n');
           return {

@@ -36,7 +36,7 @@ import type {
 import type { ClaudeContextAudit } from './stream-event.types.js';
 export type { StreamEventType, StreamEvent } from './types.js';
 
-import { sanitizeFilename, generateFallbackName } from './utils.js';
+import { sanitizeFilename, generateFallbackName, formatLocalNow } from './utils.js';
 import {
   extractSessionHistory as extractSessionHistoryImpl,
   parseTranscript,
@@ -1313,6 +1313,13 @@ async function runQuery(
     : null;
 
   const promptPieces: PromptPiece[] = [
+    {
+      name: 'runtime-context',
+      text:
+        `<runtime-context>\n当前时间：${formatLocalNow()}\n` +
+        `所有相对时间（如“明天9点”“10分钟后”“每隔N分钟”）以及 schedule_task 的 once/cron 取值，都以上面这个本地时间和时区为准；不要假设是 UTC。\n` +
+        `</runtime-context>`,
+    },
     { name: 'interaction.md', text: `<behavior>\n${INTERACTION_GUIDELINES}\n</behavior>` },
     { name: 'skill-routing.md', text: `<skill-routing>\n${SKILL_ROUTING_GUIDELINES}\n</skill-routing>` },
     { name: 'security-rules.md', text: `<security>\n${buildSecurityRulesPrompt(disableMemoryLayer)}\n</security>` },
